@@ -22,10 +22,14 @@ package test;
 
 message PerfTestRequest {
       required bool echo_attachment = 1;
+      repeated int32 matrix = 2;
+      optional int32 matrix_dimension = 3;
+      optional int64 processing_complexity = 4;
 };
 
 message PerfTestResponse {
       required string cpu_usage = 1;
+      optional int64 result_checksum = 2;
 };
 
 service PerfTestService {

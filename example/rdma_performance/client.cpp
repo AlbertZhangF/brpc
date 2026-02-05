@@ -46,6 +46,8 @@ DEFINE_int32(rpc_timeout_ms, 2000, "RPC call timeout");
 DEFINE_int32(test_seconds, 20, "Test running time");
 DEFINE_int32(test_iterations, 0, "Test iterations");
 DEFINE_int32(dummy_port, 8001, "Dummy server port number");
+DEFINE_int32(complexity, 0, "Complexity of the request");
+DEFINE_int32(matrix_size, 0, "Size of the matrix");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -144,6 +146,15 @@ public:
         closure->resp = new test::PerfTestResponse();
         closure->cntl = new brpc::Controller();
         request.set_echo_attachment(_echo_attachment);
+        if (FLAGS_matrix_size > 0) {
+            for (int i = 0; i < FLAGS_matrix_size; ++i) {
+                request.add_matrix(i);
+            }
+            request.set_matrix_dimension(FLAGS_matrix_size);
+        }
+        if (FLAGS_complexity > 0) {
+            request.set_processing_complexity(FLAGS_complexity);
+        }
         closure->cntl->request_attachment().append(_attachment);
         closure->test = this;
         google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);

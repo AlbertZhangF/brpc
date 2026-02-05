@@ -53,6 +53,25 @@ public:
         } else {
             response->set_cpu_usage("");
         }
+        
+        if (request->has_processing_complexity() && request->processing_complexity() > 0) {
+            int64_t checksum = 0;
+            const int64_t complexity = request->processing_complexity();
+            const int size = request->matrix_size();
+            for (int64_t i = 0; i < complexity; ++i) {
+                // Determine loop range based on matrix size, avoiding out of bounds
+                int loop_end = size > 0 ? size : 0;
+                checksum = 0; // Reset checksum for each complexity iteration to simulate fresh work, 
+                              // or keep accumulating? Let's accumulate to ensure data dependency.
+                for (int j = 0; j < loop_end; ++j) {
+                     checksum += request->matrix(j);
+                     // Add some dummy math to burn CPU
+                     checksum ^= (j * i);
+                }
+            }
+            response->set_result_checksum(checksum);
+        }
+
         if (request->echo_attachment()) {
             brpc::Controller* cntl =
                 static_cast<brpc::Controller*>(cntl_base);
