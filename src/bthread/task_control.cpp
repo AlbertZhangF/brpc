@@ -24,6 +24,7 @@
 #include "butil/scoped_lock.h"             // BAIDU_SCOPED_LOCK
 #include "butil/errno.h"                   // berror
 #include "butil/logging.h"
+#include "butil/time.h"                   // cpuwide_time_ns
 #include "butil/threading/platform_thread.h"
 #include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "bthread/sys_futex.h"            // futex_wake_private
@@ -34,6 +35,7 @@
 #include "bthread/timer_thread.h"         // global_timer_thread
 #include <gflags/gflags.h>
 #include "bthread/log.h"
+#include "brpc/input_message_base.h"     // For schedule latency analysis
 
 DEFINE_int32(task_group_delete_delay, 1,
              "delay deletion of TaskGroup for so many seconds");
@@ -479,6 +481,10 @@ bool TaskControl::steal_task(bthread_t* tid, size_t* seed, size_t offset) {
 }
 
 void TaskControl::signal_task(int num_task, bthread_tag_t tag) {
+    // Record signaled timestamp for all tasks in this run group
+    // NOTE: This is a heuristic, but sufficient for performance analysis
+    const uint64_t signaled_ns = butil::cpuwide_time_ns();
+    
     if (num_task <= 0) {
         return;
     }

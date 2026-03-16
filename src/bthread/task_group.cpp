@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <stddef.h>                         // size_t
 #include <gflags/gflags.h>
+#include "butil/time.h"                 // cpuwide_time_ns
 #include "butil/compat.h"                   // OS_MACOSX
 #include "butil/macros.h"                   // ARRAY_SIZE
 #include "butil/scoped_lock.h"              // BAIDU_SCOPED_LOCK
@@ -36,6 +37,7 @@
 #include "bthread/task_control.h"
 #include "bthread/task_group.h"
 #include "bthread/timer_thread.h"
+#include "brpc/input_message_base.h"         // For schedule latency analysis
 
 #ifdef __x86_64__
 #include <x86intrin.h>
@@ -371,6 +373,12 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
         // Meta and identifier of the task is persistent in this run.
         TaskMeta* const m = g->_cur_meta;
 
+        // Record running timestamp for schedule latency analysis
+        m->running_ns = butil::cpuwide_time_ns();
+        if (m->input_message_base != nullptr) {
+            static_cast<brpc::InputMessageBase*>(m->input_message_base)->bthread_running_ns = m->running_ns;
+        }
+
         if (FLAGS_show_bthread_creation_in_vars) {
             // NOTE: the thread triggering exposure of pending time may spend
             // considerable time because a single bvar::LatencyRecorder
@@ -495,6 +503,11 @@ int TaskGroup::start_foreground(TaskGroup** pg,
         m->local_storage.rpcz_parent_span = run_create_span_func();
     }
     m->cpuwide_start_ns = start_ns;
+    // Set input_message_base from TLS if available (for schedule latency analysis)
+    if (TaskMeta::tls_input_message_base != nullptr) {
+        m->input_message_base = TaskMeta::tls_input_message_base;
+        TaskMeta::tls_input_message_base = nullptr;  // Reset to nullptr
+    }
     m->stat = EMPTY_STAT;
     m->tid = make_tid(*m->version_butex, slot);
     *th = m->tid;
@@ -560,6 +573,11 @@ int TaskGroup::start_background(bthread_t* __restrict th,
         m->local_storage.rpcz_parent_span = run_create_span_func();
     }
     m->cpuwide_start_ns = start_ns;
+    // Set input_message_base from TLS if available (for schedule latency analysis)
+    if (TaskMeta::tls_input_message_base != nullptr) {
+        m->input_message_base = TaskMeta::tls_input_message_base;
+        TaskMeta::tls_input_message_base = nullptr;  // Reset to nullptr
+    }
     m->stat = EMPTY_STAT;
     m->tid = make_tid(*m->version_butex, slot);
     *th = m->tid;
@@ -713,6 +731,11 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta, bool cur_ending) {
 
     TaskMeta* const cur_meta = g->_cur_meta;
     int64_t now = butil::cpuwide_time_ns();
+    // Record scheduled timestamp for schedule latency analysis
+    next_meta->scheduled_ns = now;
+    if (next_meta->input_message_base != nullptr) {
+        static_cast<brpc::InputMessageBase*>(next_meta->input_message_base)->bthread_scheduled_ns = now;
+    }
     CPUTimeStat cpu_time_stat = g->_cpu_time_stat.load_unsafe();
     int64_t elp_ns = now - cpu_time_stat.last_run_ns();
     cur_meta->stat.cputime_ns += elp_ns;
@@ -815,6 +838,11 @@ void TaskGroup::ready_to_run(TaskMeta* meta, bool nosignal) {
 #ifdef BRPC_BTHREAD_TRACER
     _control->_task_tracer.set_status(TASK_STATUS_READY, meta);
 #endif // BRPC_BTHREAD_TRACER
+    // Record queued timestamp for schedule latency analysis
+    meta->queued_ns = butil::cpuwide_time_ns();
+    if (meta->input_message_base != nullptr) {
+        static_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_queued_ns = meta->queued_ns;
+    }
     push_rq(meta->tid);
     if (nosignal) {
         ++_num_nosignal;
@@ -822,7 +850,13 @@ void TaskGroup::ready_to_run(TaskMeta* meta, bool nosignal) {
         const int additional_signal = _num_nosignal;
         _num_nosignal = 0;
         _nsignaled += 1 + additional_signal;
+        const uint64_t signaled_ns = butil::cpuwide_time_ns();
         _control->signal_task(1 + additional_signal, _tag);
+        // Record signal timestamp
+        if (meta->input_message_base != nullptr) {
+            static_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_signaled_ns = signaled_ns;
+            meta->signaled_ns = signaled_ns;
+        }
     }
 }
 
@@ -855,7 +889,13 @@ void TaskGroup::ready_to_run_remote(TaskMeta* meta, bool nosignal) {
         _remote_num_nosignal = 0;
         _remote_nsignaled += 1 + additional_signal;
         _remote_rq._mutex.unlock();
+        const uint64_t signaled_ns = butil::cpuwide_time_ns();
         _control->signal_task(1 + additional_signal, _tag);
+        // Record signal timestamp
+        if (meta->input_message_base != nullptr) {
+            static_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_signaled_ns = signaled_ns;
+            meta->signaled_ns = signaled_ns;
+        }
     }
 }
 

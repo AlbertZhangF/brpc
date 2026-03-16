@@ -22,6 +22,7 @@
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/text_format.h>
 #include "butil/logging.h"                       // LOG()
+#include "butil/time.h"                          // cpuwide_time_ns
 #include "butil/iobuf.h"                         // butil::IOBuf
 #include "butil/raw_pack.h"                      // RawPacker RawUnpacker
 #include "butil/memory/scope_guard.h"
@@ -51,6 +52,10 @@ void bthread_assign_data(void* data);
 
 namespace brpc {
 namespace policy {
+
+// Schedule latency - from ProcessInputMessage to ProcessRpcRequest
+static bvar::LatencyRecorder g_schedule_latency_process_input_to_process_rpc(
+    "brpc_schedule_latency_process_input_to_process_rpc");
 
 DEFINE_bool(baidu_protocol_use_fullname, true,
             "If this flag is true, baidu_std puts service.full_name in requests"
@@ -563,6 +568,14 @@ bool DeserializeRpcMessage(const butil::IOBuf& data, Controller& cntl,
 }
 
 void ProcessRpcRequest(InputMessageBase* msg_base) {
+    msg_base->process_rpc_ns = butil::cpuwide_time_ns();
+    // Record latency from ProcessInputMessage to ProcessRpcRequest
+    if (msg_base->process_input_ns != 0) {
+        const int64_t lat = (msg_base->process_rpc_ns - msg_base->process_input_ns) / 1000L;
+        if (lat > 0) {
+            g_schedule_latency_process_input_to_process_rpc << lat;
+        }
+    }
     const int64_t start_parse_us = butil::cpuwide_time_us();
     DestroyingPtr<MostCommonMessage> msg(static_cast<MostCommonMessage*>(msg_base));
     SocketUniquePtr socket_guard(msg->ReleaseSocket());

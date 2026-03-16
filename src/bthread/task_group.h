@@ -30,6 +30,7 @@
 #include "butil/resource_pool.h"                    // ResourceId
 #include "bthread/parking_lot.h"
 #include "bthread/prime_offset.h"
+#include "brpc/input_message_base.h"         // For schedule latency analysis
 
 namespace bthread {
 
@@ -329,13 +330,25 @@ friend class TaskControl;
     bool wait_task(bthread_t* tid);
 
     bool steal_task(bthread_t* tid) {
+        bool stole = false;
         if (_remote_rq.pop(tid)) {
-            return true;
-        }
+            stole = true;
+        } else {
 #ifndef BTHREAD_DONT_SAVE_PARKING_STATE
-        _last_pl_state = _pl->get_state();
+            _last_pl_state = _pl->get_state();
 #endif
-        return _control->steal_task(tid, &_steal_seed, _steal_offset);
+            stole = _control->steal_task(tid, &_steal_seed, _steal_offset);
+        }
+        
+        if (stole) {
+            TaskMeta* tm = address_meta(*tid);
+            if (tm != nullptr && tm->input_message_base != nullptr) {
+                const uint64_t stolen_ns = butil::cpuwide_time_ns();
+                tm->stolen_ns = stolen_ns;
+                static_cast<brpc::InputMessageBase*>(tm->input_message_base)->bthread_stolen_ns = stolen_ns;
+            }
+        }
+        return stole;
     }
 
     void set_tag(bthread_tag_t tag) { _tag = tag; }

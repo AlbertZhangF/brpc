@@ -20,10 +20,12 @@
 #include "butil/fd_guard.h"                      // fd_guard
 #include "butil/logging.h"                       // CHECK
 #include "butil/time.h"                          // cpuwide_time_us
+#include "bthread/task_meta.h"                   // TaskMeta for timestamps
 #include "butil/fd_utility.h"                    // make_non_blocking
 #include "bthread/bthread.h"                     // bthread_start_background
 #include "bthread/unstable.h"                   // bthread_flush
 #include "bvar/bvar.h"                          // bvar::Adder
+#include "bvar/latency_recorder.h"           // bvar::LatencyRecorder
 #include "brpc/options.pb.h"               // ProtocolType
 #include "brpc/reloadable_flags.h"         // BRPC_VALIDATE_GFLAG
 #include "brpc/protocol.h"                 // ListProtocols
@@ -35,6 +37,25 @@ namespace brpc {
 
 InputMessenger* g_messenger = NULL;
 static pthread_once_t g_messenger_init = PTHREAD_ONCE_INIT;
+
+// Schedule latency bvars - record latencies in each stage (unit: us)
+static bvar::LatencyRecorder g_schedule_latency_received_to_queue_start(
+    "brpc_schedule_latency_received_to_queue_start");
+static bvar::LatencyRecorder g_schedule_latency_queue_start_to_queue_end(
+    "brpc_schedule_latency_queue_start_to_queue_end");
+static bvar::LatencyRecorder g_schedule_latency_queue_end_to_queued(
+    "brpc_schedule_latency_queue_end_to_queued");
+static bvar::LatencyRecorder g_schedule_latency_queued_to_scheduled(
+    "brpc_schedule_latency_queued_to_scheduled");
+static bvar::LatencyRecorder g_schedule_latency_scheduled_to_running(
+    "brpc_schedule_latency_scheduled_to_running");
+static bvar::LatencyRecorder g_schedule_latency_running_to_process_input(
+    "brpc_schedule_latency_running_to_process_input");
+static bvar::LatencyRecorder g_schedule_latency_process_input_to_process_rpc(
+    "brpc_schedule_latency_process_input_to_process_rpc");
+static bvar::LatencyRecorder g_schedule_latency_total(
+    "brpc_schedule_latency_total");
+
 static void InitClientSideMessenger() {
     g_messenger = new InputMessenger;
 }
@@ -181,6 +202,52 @@ ParseResult InputMessenger::CutInputMessage(
 
 void* ProcessInputMessage(void* void_arg) {
     InputMessageBase* msg = static_cast<InputMessageBase*>(void_arg);
+    msg->process_input_ns = butil::cpuwide_time_ns();
+    
+    // Record schedule latencies
+    if (msg->msg_received_ns != 0 && msg->queue_msg_start_ns != 0) {
+        const int64_t lat = (msg->queue_msg_start_ns - msg->msg_received_ns) / 1000L;
+        if (lat > 0) {
+            g_schedule_latency_received_to_queue_start << lat;
+        }
+    }
+    if (msg->queue_msg_start_ns != 0 && msg->queue_msg_end_ns != 0) {
+        const int64_t lat = (msg->queue_msg_end_ns - msg->queue_msg_start_ns) / 1000L;
+        if (lat > 0) {
+            g_schedule_latency_queue_start_to_queue_end << lat;
+        }
+    }
+    if (msg->queue_msg_end_ns != 0 && msg->bthread_queued_ns != 0) {
+        const int64_t lat = (msg->bthread_queued_ns - msg->queue_msg_end_ns) / 1000L;
+        if (lat > 0) {
+            g_schedule_latency_queue_end_to_queued << lat;
+        }
+    }
+    if (msg->bthread_queued_ns != 0 && msg->bthread_scheduled_ns != 0) {
+        const int64_t lat = (msg->bthread_scheduled_ns - msg->bthread_queued_ns) / 1000L;
+        if (lat > 0) {
+            g_schedule_latency_queued_to_scheduled << lat;
+        }
+    }
+    if (msg->bthread_scheduled_ns != 0 && msg->bthread_running_ns != 0) {
+        const int64_t lat = (msg->bthread_running_ns - msg->bthread_scheduled_ns) / 1000L;
+        if (lat > 0) {
+            g_schedule_latency_scheduled_to_running << lat;
+        }
+    }
+    if (msg->bthread_running_ns != 0 && msg->process_input_ns != 0) {
+        const int64_t lat = (msg->process_input_ns - msg->bthread_running_ns) / 1000L;
+        if (lat > 0) {
+            g_schedule_latency_running_to_process_input << lat;
+        }
+    }
+    if (msg->msg_received_ns != 0 && msg->process_input_ns != 0) {
+        const int64_t lat = (msg->process_input_ns - msg->msg_received_ns) / 1000L;
+        if (lat > 0) {
+            g_schedule_latency_total << lat;
+        }
+    }
+    
     msg->_process(msg);
     return NULL;
 }
@@ -197,6 +264,9 @@ static void QueueMessage(InputMessageBase* to_run_msg,
     if (!to_run_msg) {
         return;
     }
+    to_run_msg->queue_msg_start_ns = butil::cpuwide_time_ns();
+    // Set TLS variable to pass input_message_base to bthread during creation
+    bthread::TaskMeta::tls_input_message_base = to_run_msg;
     // Create bthread for last_msg. The bthread is not scheduled
     // until bthread_flush() is called (in the worse case).
                 
@@ -217,8 +287,10 @@ static void QueueMessage(InputMessageBase* to_run_msg,
 
     if (!FLAGS_usercode_in_coroutine && bthread_start_background(
             &th, &tmp, ProcessInputMessage, to_run_msg) == 0) {
+        to_run_msg->queue_msg_end_ns = butil::cpuwide_time_ns();
         ++*num_bthread_created;
     } else {
+        to_run_msg->queue_msg_end_ns = butil::cpuwide_time_ns();
         ProcessInputMessage(to_run_msg);
     }
 }
@@ -298,6 +370,7 @@ int InputMessenger::ProcessNewMessage(
         }
         pr.message()->_received_us = received_us;
         pr.message()->_base_real_us = base_realtime;
+        pr.message()->msg_received_ns = butil::cpuwide_time_ns();
                     
         // This unique_ptr prevents msg to be lost before transfering
         // ownership to last_msg

@@ -102,6 +102,18 @@ struct TaskMeta {
     int64_t cpuwide_start_ns{0};
     TaskStatistics stat{};
 
+    // For detailed schedule latency analysis (unit: ns)
+    // Pointer to InputMessageBase to record timestamps back
+    void* input_message_base{nullptr};
+    uint64_t queued_ns{0};       // Time when task was queued
+    uint64_t signaled_ns{0};     // Time when signal_task was called
+    uint64_t stolen_ns{0};       // Time when task was stolen/retrieved by worker
+    uint64_t scheduled_ns{0};    // Time when sched_to completed
+    uint64_t running_ns{0};      // Time when task_runner started
+
+    // TLS for passing input_message_base during bthread creation
+    static BAIDU_THREAD_LOCAL void* tls_input_message_base;
+
     // bthread local storage, sync with tls_bls (defined in task_group.cpp)
     // when the bthread is created or destroyed.
     // DO NOT use this field directly, use tls_bls instead.
