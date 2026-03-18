@@ -207,44 +207,44 @@ void* ProcessInputMessage(void* void_arg) {
     // Record schedule latencies
     if (msg->msg_received_ns != 0 && msg->queue_msg_start_ns != 0) {
         const int64_t lat = (msg->queue_msg_start_ns - msg->msg_received_ns) / 1000L;
-        if (lat > 0) {
-            g_schedule_latency_received_to_queue_start << lat;
+        if (lat > 0 && lat < INT32_MAX) {
+            g_schedule_latency_received_to_queue_start << (int32_t)lat;
         }
     }
     if (msg->queue_msg_start_ns != 0 && msg->queue_msg_end_ns != 0) {
         const int64_t lat = (msg->queue_msg_end_ns - msg->queue_msg_start_ns) / 1000L;
-        if (lat > 0) {
-            g_schedule_latency_queue_start_to_queue_end << lat;
+        if (lat > 0 && lat < INT32_MAX) {
+            g_schedule_latency_queue_start_to_queue_end << (int32_t)lat;
         }
     }
     if (msg->queue_msg_end_ns != 0 && msg->bthread_queued_ns != 0) {
         const int64_t lat = (msg->bthread_queued_ns - msg->queue_msg_end_ns) / 1000L;
-        if (lat > 0) {
-            g_schedule_latency_queue_end_to_queued << lat;
+        if (lat > 0 && lat < INT32_MAX) {
+            g_schedule_latency_queue_end_to_queued << (int32_t)lat;
         }
     }
     if (msg->bthread_queued_ns != 0 && msg->bthread_scheduled_ns != 0) {
         const int64_t lat = (msg->bthread_scheduled_ns - msg->bthread_queued_ns) / 1000L;
-        if (lat > 0) {
-            g_schedule_latency_queued_to_scheduled << lat;
+        if (lat > 0 && lat < INT32_MAX) {
+            g_schedule_latency_queued_to_scheduled << (int32_t)lat;
         }
     }
     if (msg->bthread_scheduled_ns != 0 && msg->bthread_running_ns != 0) {
         const int64_t lat = (msg->bthread_running_ns - msg->bthread_scheduled_ns) / 1000L;
-        if (lat > 0) {
-            g_schedule_latency_scheduled_to_running << lat;
+        if (lat > 0 && lat < INT32_MAX) {
+            g_schedule_latency_scheduled_to_running << (int32_t)lat;
         }
     }
     if (msg->bthread_running_ns != 0 && msg->process_input_ns != 0) {
         const int64_t lat = (msg->process_input_ns - msg->bthread_running_ns) / 1000L;
-        if (lat > 0) {
-            g_schedule_latency_running_to_process_input << lat;
+        if (lat > 0 && lat < INT32_MAX) {
+            g_schedule_latency_running_to_process_input << (int32_t)lat;
         }
     }
     if (msg->msg_received_ns != 0 && msg->process_input_ns != 0) {
         const int64_t lat = (msg->process_input_ns - msg->msg_received_ns) / 1000L;
-        if (lat > 0) {
-            g_schedule_latency_total << lat;
+        if (lat > 0 && lat < INT32_MAX) {
+            g_schedule_latency_total << (int32_t)lat;
         }
     }
     

@@ -206,62 +206,56 @@ public:
         if (FLAGS_enable_schedule_tracing && !g_tracing_full.load(butil::memory_order_relaxed) &&
             !cntl_guard->response_attachment().empty()) {
 
-            butil::IOBufAsZeroCopyInputStream wrapper(cntl_guard->response_attachment());
-            const void* data = NULL;
-            int size = 0;
+            // Convert entire attachment to string to handle multi-segment IOBuf
+            std::string attachment_str;
+            cntl_guard->response_attachment().copy_to(&attachment_str);
 
-            if (wrapper.Next(&data, &size) && size >= 6) { // At least "TRACE:" prefix
-                const char* buf = static_cast<const char*>(data);
-                if (memcmp(buf, "TRACE:", 6) == 0) { // Verify trace magic
-                    const char* trace_buf = buf + 6;
-                    int trace_len = size - 6;
-
-                    // Check if we have space before doing any parsing
-                    BAIDU_SCOPED_LOCK(g_trace_mutex);
-                    if (g_schedule_traces.size() >= (size_t)FLAGS_max_trace_count) {
-                        g_tracing_full.store(true, butil::memory_order_relaxed);
-                        return;
-                    }
-
-                    ScheduleTraceInfo trace;
-                    // Simple manual parser for key=value|key=value format
-                    const char* p = trace_buf;
-                    const char* end = trace_buf + trace_len;
-
-                    auto parse_uint64 = [](const char* start, const char* end) -> uint64_t {
-                        uint64_t val = 0;
-                        while (start < end && *start >= '0' && *start <= '9') {
-                            val = val * 10 + (*start - '0');
-                            start++;
-                        }
-                        return val;
-                    };
-
-                    while (p < end) {
-                        const char* eq = (const char*)memchr(p, '=', end - p);
-                        if (!eq) break;
-                        const char* bar = (const char*)memchr(eq + 1, '|', end - (eq + 1));
-                        if (!bar) bar = end;
-
-                        butil::StringPiece key(p, eq - p);
-                        uint64_t val = parse_uint64(eq + 1, bar);
-
-                        if (key == "msg_received_ns") trace.msg_received_ns = val;
-                        else if (key == "queue_msg_start_ns") trace.queue_msg_start_ns = val;
-                        else if (key == "queue_msg_end_ns") trace.queue_msg_end_ns = val;
-                        else if (key == "bthread_queued_ns") trace.bthread_queued_ns = val;
-                        else if (key == "bthread_signaled_ns") trace.bthread_signaled_ns = val;
-                        else if (key == "bthread_stolen_ns") trace.bthread_stolen_ns = val;
-                        else if (key == "bthread_scheduled_ns") trace.bthread_scheduled_ns = val;
-                        else if (key == "bthread_running_ns") trace.bthread_running_ns = val;
-                        else if (key == "process_input_ns") trace.process_input_ns = val;
-                        else if (key == "process_rpc_ns") trace.process_rpc_ns = val;
-
-                        p = bar + 1;
-                    }
-
-                    g_schedule_traces.push_back(trace);
+            if (attachment_str.size() >= 6 && memcmp(attachment_str.data(), "TRACE:", 6) == 0) {
+                // Check if we have space before doing any parsing
+                BAIDU_SCOPED_LOCK(g_trace_mutex);
+                if (g_schedule_traces.size() >= (size_t)FLAGS_max_trace_count) {
+                    g_tracing_full.store(true, butil::memory_order_relaxed);
+                    return;
                 }
+
+                ScheduleTraceInfo trace;
+                // Simple manual parser for key=value|key=value format
+                const char* p = attachment_str.data() + 6;
+                const char* end = attachment_str.data() + attachment_str.size();
+
+                auto parse_uint64 = [](const char* start, const char* end) -> uint64_t {
+                    uint64_t val = 0;
+                    while (start < end && *start >= '0' && *start <= '9') {
+                        val = val * 10 + (*start - '0');
+                        start++;
+                    }
+                    return val;
+                };
+
+                while (p < end) {
+                    const char* eq = (const char*)memchr(p, '=', end - p);
+                    if (!eq) break;
+                    const char* bar = (const char*)memchr(eq + 1, '|', end - (eq + 1));
+                    if (!bar) bar = end;
+
+                    butil::StringPiece key(p, eq - p);
+                    uint64_t val = parse_uint64(eq + 1, bar);
+
+                    if (key == "msg_received_ns") trace.msg_received_ns = val;
+                    else if (key == "queue_msg_start_ns") trace.queue_msg_start_ns = val;
+                    else if (key == "queue_msg_end_ns") trace.queue_msg_end_ns = val;
+                    else if (key == "bthread_queued_ns") trace.bthread_queued_ns = val;
+                    else if (key == "bthread_signaled_ns") trace.bthread_signaled_ns = val;
+                    else if (key == "bthread_stolen_ns") trace.bthread_stolen_ns = val;
+                    else if (key == "bthread_scheduled_ns") trace.bthread_scheduled_ns = val;
+                    else if (key == "bthread_running_ns") trace.bthread_running_ns = val;
+                    else if (key == "process_input_ns") trace.process_input_ns = val;
+                    else if (key == "process_rpc_ns") trace.process_rpc_ns = val;
+
+                    p = bar + 1;
+                }
+
+                g_schedule_traces.push_back(trace);
             }
         }
 
