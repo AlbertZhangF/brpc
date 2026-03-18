@@ -18,10 +18,12 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <vector>
+#include <inttypes.h>
 #include <gflags/gflags.h>
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
 #include "butil/logging.h"
+#include "butil/string_splitter.h"
 #include "brpc/rdma/rdma_helper.h"
 #include "brpc/server.h"
 #include "brpc/channel.h"
@@ -29,6 +31,9 @@
 #include "bvar/latency_recorder.h"
 #include "bvar/variable.h"
 #include "test.pb.h"
+
+DEFINE_bool(enable_schedule_tracing, false, "Enable collection of schedule latency traces from server");
+DEFINE_int32(max_trace_count, 1000, "Maximum number of traces to collect");
 
 #ifdef BRPC_WITH_RDMA
 
@@ -58,6 +63,23 @@ butil::atomic<uint64_t> g_total_cnt;
 std::vector<std::string> g_servers;
 int rr_index = 0;
 volatile bool g_stop = false;
+
+// For collecting schedule latency trace info from server
+struct ScheduleTraceInfo {
+    uint64_t msg_received_ns{0};
+    uint64_t queue_msg_start_ns{0};
+    uint64_t queue_msg_end_ns{0};
+    uint64_t bthread_queued_ns{0};
+    uint64_t bthread_signaled_ns{0};
+    uint64_t bthread_stolen_ns{0};
+    uint64_t bthread_scheduled_ns{0};
+    uint64_t bthread_running_ns{0};
+    uint64_t process_input_ns{0};
+    uint64_t process_rpc_ns{0};
+};
+butil::Mutex g_trace_mutex;
+std::vector<ScheduleTraceInfo> g_schedule_traces;
+butil::atomic<bool> g_tracing_full{false};
 
 butil::atomic<int64_t> g_token(10000);
 
@@ -178,6 +200,53 @@ public:
         g_total_bytes.fetch_add(closure->cntl->request_attachment().size(), butil::memory_order_relaxed);
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
 
+        // Collect schedule latency trace from response attachment
+        if (FLAGS_enable_schedule_tracing && !g_tracing_full.load(butil::memory_order_relaxed) &&
+            !cntl_guard->response_attachment().empty()) {
+
+            butil::IOBufAsZeroCopyInputStream wrapper(cntl_guard->response_attachment());
+            const void* data = NULL;
+            int size = 0;
+
+            if (wrapper.Next(&data, &size) && size >= 6) { // At least "TRACE:" prefix
+                const char* buf = static_cast<const char*>(data);
+                if (memcmp(buf, "TRACE:", 6) == 0) { // Verify trace magic
+                    const char* trace_buf = buf + 6;
+                    int trace_len = size - 6;
+
+                    // Check if we have space before doing any parsing
+                    BAIDU_SCOPED_LOCK(g_trace_mutex);
+                    if (g_schedule_traces.size() >= (size_t)FLAGS_max_trace_count) {
+                        g_tracing_full.store(true, butil::memory_order_relaxed);
+                        return;
+                    }
+
+                    ScheduleTraceInfo trace;
+                    // Use KeyValuePairsSplitter to parse key=value|key=value format
+                    butil::KeyValuePairsSplitter splitter(trace_buf, trace_len, '|', '=');
+                    while (splitter.next()) {
+                        butil::StringPiece key = splitter.key();
+                        butil::StringPiece value = splitter.value();
+                        uint64_t val = 0;
+                        if (butil::StringToUInt64(value, &val)) {
+                            if (key == "msg_received_ns") trace.msg_received_ns = val;
+                            else if (key == "queue_msg_start_ns") trace.queue_msg_start_ns = val;
+                            else if (key == "queue_msg_end_ns") trace.queue_msg_end_ns = val;
+                            else if (key == "bthread_queued_ns") trace.bthread_queued_ns = val;
+                            else if (key == "bthread_signaled_ns") trace.bthread_signaled_ns = val;
+                            else if (key == "bthread_stolen_ns") trace.bthread_stolen_ns = val;
+                            else if (key == "bthread_scheduled_ns") trace.bthread_scheduled_ns = val;
+                            else if (key == "bthread_running_ns") trace.bthread_running_ns = val;
+                            else if (key == "process_input_ns") trace.process_input_ns = val;
+                            else if (key == "process_rpc_ns") trace.process_rpc_ns = val;
+                        }
+                    }
+
+                    g_schedule_traces.push_back(trace);
+                }
+            }
+        }
+
         cntl_guard.reset(NULL);
         response_guard.reset(NULL);
 
@@ -190,7 +259,7 @@ public:
         uint64_t now = butil::gettimeofday_us();
         if (now > last && now - last > 100000) {
             if (g_last_time.exchange(now, butil::memory_order_relaxed) == last) {
-                g_client_cpu_recorder << 
+                g_client_cpu_recorder <<
                     atof(bvar::Variable::describe_exposed("process_cpu_usage").c_str()) * 100;
             }
         }
@@ -238,6 +307,10 @@ void Test(int thread_num, int attachment_size) {
         << std::endl;
     g_total_bytes.store(0, butil::memory_order_relaxed);
     g_total_cnt.store(0, butil::memory_order_relaxed);
+    BAIDU_SCOPED_LOCK(g_trace_mutex);
+    g_schedule_traces.clear();
+    g_schedule_traces.reserve(FLAGS_max_trace_count); // Pre-allocate space
+    g_tracing_full.store(false, butil::memory_order_relaxed);
     std::vector<PerformanceTest*> tests;
     for (int k = 0; k < thread_num; ++k) {
         PerformanceTest* t = new PerformanceTest(attachment_size, FLAGS_echo_attachment);
@@ -279,6 +352,55 @@ void Test(int thread_num, int attachment_size) {
     g_stop = true;
     for (int k = 0; k < thread_num; ++k) {
         bthread_start_background(&tid[k], &BTHREAD_ATTR_NORMAL, DeleteTest, tests[k]);
+    }
+
+    // Print all collected schedule latency traces
+    BAIDU_SCOPED_LOCK(g_trace_mutex);
+    if (!g_schedule_traces.empty()) {
+        std::cout << "\n=== Collected Schedule Latency Traces ("
+                  << g_schedule_traces.size() << " entries) ===" << std::endl;
+        std::cout << "# | msg_received → queue_msg_start → queue_msg_end → bthread_queued "
+                  << "→ bthread_signaled → bthread_stolen → bthread_scheduled "
+                  << "→ bthread_running → process_input → process_rpc | total (us)" << std::endl;
+        std::cout << "---" << std::endl;
+
+        for (size_t i = 0; i < g_schedule_traces.size(); ++i) {
+            const auto& trace = g_schedule_traces[i];
+
+            // Validate timestamps to avoid underflow
+            auto safe_diff = [](uint64_t a, uint64_t b) -> uint64_t {
+                return (a > b) ? (a - b) : 0;
+            };
+
+            uint64_t t1 = safe_diff(trace.queue_msg_start_ns, trace.msg_received_ns) / 1000;
+            uint64_t t2 = safe_diff(trace.queue_msg_end_ns, trace.queue_msg_start_ns) / 1000;
+            uint64_t t3 = safe_diff(trace.bthread_queued_ns, trace.queue_msg_end_ns) / 1000;
+            uint64_t t4 = safe_diff(trace.bthread_signaled_ns, trace.bthread_queued_ns) / 1000;
+            uint64_t t5 = trace.bthread_stolen_ns ? safe_diff(trace.bthread_stolen_ns, trace.bthread_signaled_ns) / 1000 : 0;
+            uint64_t t6 = safe_diff(trace.bthread_scheduled_ns, trace.bthread_stolen_ns ? trace.bthread_stolen_ns : trace.bthread_signaled_ns) / 1000;
+            uint64_t t7 = safe_diff(trace.bthread_running_ns, trace.bthread_scheduled_ns) / 1000;
+            uint64_t t8 = safe_diff(trace.process_input_ns, trace.bthread_running_ns) / 1000;
+            uint64_t t9 = safe_diff(trace.process_rpc_ns, trace.process_input_ns) / 1000;
+            uint64_t total_ns = safe_diff(trace.process_rpc_ns, trace.msg_received_ns);
+
+            printf("%zu | %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " | %6.2f\n",
+                   i + 1, t1, t2, t3, t4, t5, t6, t7, t8, t9, total_ns / 1000.0);
+        }
+
+        // Print summary statistics
+        if (g_schedule_traces.size() > 1) {
+            std::cout << "\n=== Trace Summary Statistics ===" << std::endl;
+            uint64_t min_total = ~0ULL, max_total = 0, sum_total = 0;
+            for (const auto& trace : g_schedule_traces) {
+                uint64_t total = trace.process_rpc_ns - trace.msg_received_ns;
+                min_total = std::min(min_total, total);
+                max_total = std::max(max_total, total);
+                sum_total += total;
+            }
+            double avg_total = sum_total * 1.0 / g_schedule_traces.size() / 1000;
+            printf("Min: %.2fus | Max: %.2fus | Avg: %.2fus | Total Traces: %zu\n",
+                   (double)min_total / 1000.0, (double)max_total / 1000.0, avg_total, g_schedule_traces.size());
+        }
     }
 }
 
