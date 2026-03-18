@@ -876,7 +876,7 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
 
         // Apply sampling
         if (count % FLAGS_schedule_tracing_sampling == 0) {
-            if (FLAGS_v >= 1) {
+            if (logging::FLAGS_v >= 1) {
                 VLOG(1) << "ScheduleLatencyTrace:"
                         << " msg_received_ns=" << msg_base->msg_received_ns
                         << " queue_msg_start_ns=" << msg_base->queue_msg_start_ns

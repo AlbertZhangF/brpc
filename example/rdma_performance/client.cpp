@@ -222,24 +222,40 @@ public:
                     }
 
                     ScheduleTraceInfo trace;
-                    // Use KeyValuePairsSplitter to parse key=value|key=value format
-                    butil::KeyValuePairsSplitter splitter(trace_buf, trace_len, '|', '=');
-                    while (splitter.next()) {
-                        butil::StringPiece key = splitter.key();
-                        butil::StringPiece value = splitter.value();
+                    // Simple manual parser for key=value|key=value format
+                    const char* p = trace_buf;
+                    const char* end = trace_buf + trace_len;
+
+                    auto parse_uint64 = [](const char* start, const char* end) -> uint64_t {
                         uint64_t val = 0;
-                        if (butil::StringToUInt64(value, &val)) {
-                            if (key == "msg_received_ns") trace.msg_received_ns = val;
-                            else if (key == "queue_msg_start_ns") trace.queue_msg_start_ns = val;
-                            else if (key == "queue_msg_end_ns") trace.queue_msg_end_ns = val;
-                            else if (key == "bthread_queued_ns") trace.bthread_queued_ns = val;
-                            else if (key == "bthread_signaled_ns") trace.bthread_signaled_ns = val;
-                            else if (key == "bthread_stolen_ns") trace.bthread_stolen_ns = val;
-                            else if (key == "bthread_scheduled_ns") trace.bthread_scheduled_ns = val;
-                            else if (key == "bthread_running_ns") trace.bthread_running_ns = val;
-                            else if (key == "process_input_ns") trace.process_input_ns = val;
-                            else if (key == "process_rpc_ns") trace.process_rpc_ns = val;
+                        while (start < end && *start >= '0' && *start <= '9') {
+                            val = val * 10 + (*start - '0');
+                            start++;
                         }
+                        return val;
+                    };
+
+                    while (p < end) {
+                        const char* eq = (const char*)memchr(p, '=', end - p);
+                        if (!eq) break;
+                        const char* bar = (const char*)memchr(eq + 1, '|', end - (eq + 1));
+                        if (!bar) bar = end;
+
+                        butil::StringPiece key(p, eq - p);
+                        uint64_t val = parse_uint64(eq + 1, bar);
+
+                        if (key == "msg_received_ns") trace.msg_received_ns = val;
+                        else if (key == "queue_msg_start_ns") trace.queue_msg_start_ns = val;
+                        else if (key == "queue_msg_end_ns") trace.queue_msg_end_ns = val;
+                        else if (key == "bthread_queued_ns") trace.bthread_queued_ns = val;
+                        else if (key == "bthread_signaled_ns") trace.bthread_signaled_ns = val;
+                        else if (key == "bthread_stolen_ns") trace.bthread_stolen_ns = val;
+                        else if (key == "bthread_scheduled_ns") trace.bthread_scheduled_ns = val;
+                        else if (key == "bthread_running_ns") trace.bthread_running_ns = val;
+                        else if (key == "process_input_ns") trace.process_input_ns = val;
+                        else if (key == "process_rpc_ns") trace.process_rpc_ns = val;
+
+                        p = bar + 1;
                     }
 
                     g_schedule_traces.push_back(trace);
@@ -359,9 +375,7 @@ void Test(int thread_num, int attachment_size) {
     if (!g_schedule_traces.empty()) {
         std::cout << "\n=== Collected Schedule Latency Traces ("
                   << g_schedule_traces.size() << " entries) ===" << std::endl;
-        std::cout << "# | msg_received → queue_msg_start → queue_msg_end → bthread_queued "
-                  << "→ bthread_signaled → bthread_stolen → bthread_scheduled "
-                  << "→ bthread_running → process_input → process_rpc | total (us)" << std::endl;
+        std::cout << "# | msg_rcv→q_start → q_end→bthread_q → signaled→stolen → scheduled→running → input→rpc | total (us)" << std::endl;
         std::cout << "---" << std::endl;
 
         for (size_t i = 0; i < g_schedule_traces.size(); ++i) {
@@ -383,7 +397,7 @@ void Test(int thread_num, int attachment_size) {
             uint64_t t9 = safe_diff(trace.process_rpc_ns, trace.process_input_ns) / 1000;
             uint64_t total_ns = safe_diff(trace.process_rpc_ns, trace.msg_received_ns);
 
-            printf("%zu | %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " | %6.2f\n",
+            printf("%zu | %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " | %6.2f\n",
                    i + 1, t1, t2, t3, t4, t5, t6, t7, t8, t9, total_ns / 1000.0);
         }
 
