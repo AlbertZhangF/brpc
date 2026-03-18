@@ -32,8 +32,9 @@
 #include "bvar/variable.h"
 #include "test.pb.h"
 
-DEFINE_bool(enable_schedule_tracing, false, "Enable collection of schedule latency traces from server");
-DEFINE_int32(max_trace_count, 1000, "Maximum number of traces to collect");
+// Use DECLARE to reference flags defined in brpc library
+DECLARE_bool(enable_schedule_tracing);
+DECLARE_int32(max_trace_count);
 
 #ifdef BRPC_WITH_RDMA
 

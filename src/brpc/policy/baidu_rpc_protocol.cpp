@@ -876,20 +876,21 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
 
         // Apply sampling
         if (count % FLAGS_schedule_tracing_sampling == 0) {
-            if (logging::FLAGS_v >= 1) {
-                VLOG(1) << "ScheduleLatencyTrace:"
-                        << " msg_received_ns=" << msg_base->msg_received_ns
-                        << " queue_msg_start_ns=" << msg_base->queue_msg_start_ns
-                        << " queue_msg_end_ns=" << msg_base->queue_msg_end_ns
-                        << " bthread_queued_ns=" << msg_base->bthread_queued_ns
-                        << " bthread_signaled_ns=" << msg_base->bthread_signaled_ns
-                        << " bthread_stolen_ns=" << msg_base->bthread_stolen_ns
-                        << " bthread_scheduled_ns=" << msg_base->bthread_scheduled_ns
-                        << " bthread_running_ns=" << msg_base->bthread_running_ns
-                        << " process_input_ns=" << msg_base->process_input_ns
-                        << " process_rpc_ns=" << msg_base->process_rpc_ns;
+            // VLOG automatically checks FLAGS_v level, no need for manual check
+            VLOG(1) << "ScheduleLatencyTrace:"
+                    << " msg_received_ns=" << msg_base->msg_received_ns
+                    << " queue_msg_start_ns=" << msg_base->queue_msg_start_ns
+                    << " queue_msg_end_ns=" << msg_base->queue_msg_end_ns
+                    << " bthread_queued_ns=" << msg_base->bthread_queued_ns
+                    << " bthread_signaled_ns=" << msg_base->bthread_signaled_ns
+                    << " bthread_stolen_ns=" << msg_base->bthread_stolen_ns
+                    << " bthread_scheduled_ns=" << msg_base->bthread_scheduled_ns
+                    << " bthread_running_ns=" << msg_base->bthread_running_ns
+                    << " process_input_ns=" << msg_base->process_input_ns
+                    << " process_rpc_ns=" << msg_base->process_rpc_ns;
 
-                // Calculate and log individual stage latencies only when VLOG is enabled
+            // Calculate and log individual stage latencies (only when VLOG is enabled)
+            if (VLOG_IS_ON(1)) {
                 if (msg_base->queue_msg_start_ns > msg_base->msg_received_ns) {
                     VLOG(1) << "  Stage[msg_received->queue_msg_start]: "
                             << (msg_base->queue_msg_start_ns - msg_base->msg_received_ns) << " ns";
