@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <vector>
 #include <inttypes.h>
+#include <csignal>
 #include <gflags/gflags.h>
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
@@ -84,6 +85,49 @@ std::vector<ScheduleTraceInfo> g_schedule_traces;
 butil::atomic<bool> g_tracing_full{false};
 
 butil::atomic<int64_t> g_token(10000);
+
+// Signal handler for printing traces on interrupt
+static volatile bool g_interrupted = false;
+static void PrintTracesOnInterrupt(int sig) {
+    g_interrupted = true;
+    g_stop = true;  // Stop all threads
+    // Print traces before exiting
+    BAIDU_SCOPED_LOCK(g_trace_mutex);
+    if (!g_schedule_traces.empty()) {
+        std::cout << "\n=== Collected Schedule Latency Traces (" << g_schedule_traces.size() << " entries) ===" << std::endl;
+        std::cout << "# | msg_rcv→q_start → q_end→bthread_q → signaled→stolen → scheduled→running → input→rpc | total (us)" << std::endl;
+        std::cout << "---" << std::endl;
+        for (size_t i = 0; i < g_schedule_traces.size(); ++i) {
+            const auto& trace = g_schedule_traces[i];
+            auto safe_diff = [](uint64_t a, uint64_t b) -> uint64_t { return (a > b) ? (a - b) : 0; };
+            uint64_t t1 = safe_diff(trace.queue_msg_start_ns, trace.msg_received_ns) / 1000;
+            uint64_t t2 = safe_diff(trace.queue_msg_end_ns, trace.queue_msg_start_ns) / 1000;
+            uint64_t t3 = safe_diff(trace.bthread_queued_ns, trace.queue_msg_end_ns) / 1000;
+            uint64_t t4 = safe_diff(trace.bthread_signaled_ns, trace.bthread_queued_ns) / 1000;
+            uint64_t t5 = trace.bthread_stolen_ns ? safe_diff(trace.bthread_stolen_ns, trace.bthread_signaled_ns) / 1000 : 0;
+            uint64_t t6 = safe_diff(trace.bthread_scheduled_ns, trace.bthread_stolen_ns ? trace.bthread_stolen_ns : trace.bthread_signaled_ns) / 1000;
+            uint64_t t7 = safe_diff(trace.bthread_running_ns, trace.bthread_scheduled_ns) / 1000;
+            uint64_t t8 = safe_diff(trace.process_input_ns, trace.bthread_running_ns) / 1000;
+            uint64_t t9 = safe_diff(trace.process_rpc_ns, trace.process_input_ns) / 1000;
+            uint64_t total_ns = safe_diff(trace.process_rpc_ns, trace.msg_received_ns);
+            printf("%zu | %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " | %6.2f\n",
+                   i + 1, t1, t2, t3, t4, t5, t6, t7, t8, t9, total_ns / 1000.0);
+        }
+        if (g_schedule_traces.size() > 1) {
+            std::cout << "\n=== Trace Summary Statistics ===" << std::endl;
+            uint64_t min_total = ~0ULL, max_total = 0, sum_total = 0;
+            for (const auto& trace : g_schedule_traces) {
+                uint64_t total = trace.process_rpc_ns - trace.msg_received_ns;
+                min_total = std::min(min_total, total);
+                max_total = std::max(max_total, total);
+                sum_total += total;
+            }
+            double avg_total = sum_total * 1.0 / g_schedule_traces.size() / 1000;
+            printf("Min: %.2fus | Max: %.2fus | Avg: %.2fus | Total Traces: %zu\n",
+                   (double)min_total / 1000.0, (double)max_total / 1000.0, avg_total, g_schedule_traces.size());
+        }
+    }
+}
 
 static void* GenerateToken(void* arg) {
     int64_t start_time = butil::monotonic_time_ns();
@@ -215,49 +259,50 @@ public:
                 BAIDU_SCOPED_LOCK(g_trace_mutex);
                 if (g_schedule_traces.size() >= (size_t)FLAGS_max_trace_count) {
                     g_tracing_full.store(true, butil::memory_order_relaxed);
-                    return;
-                }
+                    // Don't return here - continue to process time check logic below
+                } else {
 
-                ScheduleTraceInfo trace;
-                // Simple manual parser for key=value|key=value format
-                const char* p = attachment_str.data() + 6;
-                const char* end = attachment_str.data() + attachment_str.size();
+                    ScheduleTraceInfo trace;
+                    // Simple manual parser for key=value|key=value format
+                    const char* p = attachment_str.data() + 6;
+                    const char* end = attachment_str.data() + attachment_str.size();
 
-                auto parse_uint64 = [](const char* start, const char* end) -> uint64_t {
-                    uint64_t val = 0;
-                    while (start < end && *start >= '0' && *start <= '9') {
-                        val = val * 10 + (*start - '0');
-                        start++;
+                    auto parse_uint64 = [](const char* start, const char* end) -> uint64_t {
+                        uint64_t val = 0;
+                        while (start < end && *start >= '0' && *start <= '9') {
+                            val = val * 10 + (*start - '0');
+                            start++;
+                        }
+                        return val;
+                    };
+
+                    while (p < end) {
+                        const char* eq = (const char*)memchr(p, '=', end - p);
+                        if (!eq) break;
+                        const char* bar = (const char*)memchr(eq + 1, '|', end - (eq + 1));
+                        if (!bar) bar = end;
+
+                        butil::StringPiece key(p, eq - p);
+                        uint64_t val = parse_uint64(eq + 1, bar);
+
+                        if (key == "msg_received_ns") trace.msg_received_ns = val;
+                        else if (key == "queue_msg_start_ns") trace.queue_msg_start_ns = val;
+                        else if (key == "queue_msg_end_ns") trace.queue_msg_end_ns = val;
+                        else if (key == "bthread_queued_ns") trace.bthread_queued_ns = val;
+                        else if (key == "bthread_signaled_ns") trace.bthread_signaled_ns = val;
+                        else if (key == "bthread_stolen_ns") trace.bthread_stolen_ns = val;
+                        else if (key == "bthread_scheduled_ns") trace.bthread_scheduled_ns = val;
+                        else if (key == "bthread_running_ns") trace.bthread_running_ns = val;
+                        else if (key == "process_input_ns") trace.process_input_ns = val;
+                        else if (key == "process_rpc_ns") trace.process_rpc_ns = val;
+
+                        p = bar + 1;
                     }
-                    return val;
-                };
 
-                while (p < end) {
-                    const char* eq = (const char*)memchr(p, '=', end - p);
-                    if (!eq) break;
-                    const char* bar = (const char*)memchr(eq + 1, '|', end - (eq + 1));
-                    if (!bar) bar = end;
-
-                    butil::StringPiece key(p, eq - p);
-                    uint64_t val = parse_uint64(eq + 1, bar);
-
-                    if (key == "msg_received_ns") trace.msg_received_ns = val;
-                    else if (key == "queue_msg_start_ns") trace.queue_msg_start_ns = val;
-                    else if (key == "queue_msg_end_ns") trace.queue_msg_end_ns = val;
-                    else if (key == "bthread_queued_ns") trace.bthread_queued_ns = val;
-                    else if (key == "bthread_signaled_ns") trace.bthread_signaled_ns = val;
-                    else if (key == "bthread_stolen_ns") trace.bthread_stolen_ns = val;
-                    else if (key == "bthread_scheduled_ns") trace.bthread_scheduled_ns = val;
-                    else if (key == "bthread_running_ns") trace.bthread_running_ns = val;
-                    else if (key == "process_input_ns") trace.process_input_ns = val;
-                    else if (key == "process_rpc_ns") trace.process_rpc_ns = val;
-
-                    p = bar + 1;
-                }
-
-                g_schedule_traces.push_back(trace);
-            }
-        }
+                    g_schedule_traces.push_back(trace);
+                } // else - buffer has space
+            } // if TRACE: prefix found
+        } // if tracing enabled and not full
 
         cntl_guard.reset(NULL);
         response_guard.reset(NULL);
@@ -416,6 +461,10 @@ void Test(int thread_num, int attachment_size) {
 
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+
+    // Register signal handler for printing traces on interrupt
+    signal(SIGINT, PrintTracesOnInterrupt);
+    signal(SIGTERM, PrintTracesOnInterrupt);
 
     // Initialize RDMA environment in advance.
     if (FLAGS_use_rdma) {
