@@ -371,6 +371,22 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
         // Meta and identifier of the task is persistent in this run.
         TaskMeta* const m = g->_cur_meta;
 
+        // Record start execution time and calculate scheduling latency
+        if (m->start_exec_us == 0) {
+            m->start_exec_us = butil::cpuwide_time_us();
+            if (m->create_us > 0 && m->enqueue_us > 0 && m->dequeue_us > 0) {
+                uint64_t total_sched_us = m->start_exec_us - m->create_us;
+                uint64_t queue_us = m->dequeue_us - m->enqueue_us;
+                uint64_t switch_us = m->start_exec_us - m->dequeue_us;
+                extern bvar::LatencyRecorder g_sched_latency;
+                extern bvar::LatencyRecorder g_queue_latency;
+                extern bvar::LatencyRecorder g_switch_latency;
+                g_sched_latency << total_sched_us;
+                g_queue_latency << queue_us;
+                g_switch_latency << switch_us;
+            }
+        }
+
         if (FLAGS_show_bthread_creation_in_vars) {
             // NOTE: the thread triggering exposure of pending time may spend
             // considerable time because a single bvar::LatencyRecorder
@@ -497,6 +513,7 @@ int TaskGroup::start_foreground(TaskGroup** pg,
     m->cpuwide_start_ns = start_ns;
     m->stat = EMPTY_STAT;
     m->tid = make_tid(*m->version_butex, slot);
+    m->create_us = butil::cpuwide_time_us(); // Record task creation time
     *th = m->tid;
     if (using_attr.flags & BTHREAD_LOG_START_AND_FINISH) {
         LOG(INFO) << "Started bthread " << m->tid;
@@ -562,6 +579,7 @@ int TaskGroup::start_background(bthread_t* __restrict th,
     m->cpuwide_start_ns = start_ns;
     m->stat = EMPTY_STAT;
     m->tid = make_tid(*m->version_butex, slot);
+    m->create_us = butil::cpuwide_time_us(); // Record task creation time
     *th = m->tid;
     if (using_attr.flags & BTHREAD_LOG_START_AND_FINISH) {
         LOG(INFO) << "Started bthread " << m->tid;
@@ -713,6 +731,10 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta, bool cur_ending) {
 
     TaskMeta* const cur_meta = g->_cur_meta;
     int64_t now = butil::cpuwide_time_ns();
+    // Record dequeue time for newly scheduled tasks
+    if (next_meta->dequeue_us == 0) {
+        next_meta->dequeue_us = butil::cpuwide_time_us();
+    }
     CPUTimeStat cpu_time_stat = g->_cpu_time_stat.load_unsafe();
     int64_t elp_ns = now - cpu_time_stat.last_run_ns();
     cur_meta->stat.cputime_ns += elp_ns;
@@ -815,6 +837,7 @@ void TaskGroup::ready_to_run(TaskMeta* meta, bool nosignal) {
 #ifdef BRPC_BTHREAD_TRACER
     _control->_task_tracer.set_status(TASK_STATUS_READY, meta);
 #endif // BRPC_BTHREAD_TRACER
+    meta->enqueue_us = butil::cpuwide_time_us(); // Record enqueue time
     push_rq(meta->tid);
     if (nosignal) {
         ++_num_nosignal;
@@ -839,6 +862,7 @@ void TaskGroup::ready_to_run_remote(TaskMeta* meta, bool nosignal) {
 #ifdef BRPC_BTHREAD_TRACER
     _control->_task_tracer.set_status(TASK_STATUS_READY, meta);
 #endif // BRPC_BTHREAD_TRACER
+    meta->enqueue_us = butil::cpuwide_time_us(); // Record enqueue time
     _remote_rq._mutex.lock();
     while (!_remote_rq.push_locked(meta->tid)) {
         flush_nosignal_tasks_remote_locked(_remote_rq._mutex);

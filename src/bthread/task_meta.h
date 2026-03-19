@@ -115,6 +115,12 @@ struct TaskMeta {
     // Worker thread id.
     pthread_t worker_tid{};
 
+    // Scheduling latency statistics
+    uint64_t create_us;       // Task creation time (us)
+    uint64_t enqueue_us;      // Time when task is added to runqueue (us)
+    uint64_t dequeue_us;      // Time when task is removed from runqueue (us)
+    uint64_t start_exec_us;   // Time when task starts execution (us)
+
 public:
     // Only initialize [Not Reset] fields, other fields will be reset in
     // bthread_start* functions

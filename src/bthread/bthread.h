@@ -413,20 +413,50 @@ extern int bthread_once(bthread_once_t* once_control, void (*init_routine)());
  /**
  * @brief Retrieves the CPU time consumed by the current bthread.
  *
- * This function returns the CPU time (in nanoseconds) used by the current 
- * bthread, excluding time spent in blocking I/O operations. The result 
- * provides an accurate measure of CPU time utilized by the bthread's 
+ * This function returns the CPU time (in nanoseconds) used by the current
+ * bthread, excluding time spent in blocking I/O operations. The result
+ * provides an accurate measure of CPU time utilized by the bthread's
  * execution.
  *
- * @note The functionality of this function depends on the 
- *       `bthread_enable_cpu_clock_stat` flag. Ensure this flag is enabled 
- *       for the function to provide meaningful results. If the flag is 
- *       disabled, the function may return an invalid value or behave 
+ * @note The functionality of this function depends on the
+ *       `bthread_enable_cpu_clock_stat` flag. Ensure this flag is enabled
+ *       for the function to provide meaningful results. If the flag is
+ *       disabled, the function may return an invalid value or behave
  *       unexpectedly.
  *
  * @return int64_t The CPU time in nanoseconds consumed by the bthread.
  */
 extern uint64_t bthread_cpu_clock_ns(void);
+
+/**
+ * @brief Retrieves the total scheduling latency of the current bthread.
+ *
+ * This function returns the total time (in microseconds) from when the bthread
+ * was created to when it started executing.
+ *
+ * @return uint64_t Total scheduling latency in microseconds, 0 if not available.
+ */
+extern uint64_t bthread_sched_latency_us(void);
+
+/**
+ * @brief Retrieves the queue wait latency of the current bthread.
+ *
+ * This function returns the time (in microseconds) the bthread spent waiting
+ * in the runqueue before being scheduled.
+ *
+ * @return uint64_t Queue wait latency in microseconds, 0 if not available.
+ */
+extern uint64_t bthread_queue_latency_us(void);
+
+/**
+ * @brief Retrieves the context switch latency of the current bthread.
+ *
+ * This function returns the time (in microseconds) from when the bthread was
+ * taken out of the runqueue to when it started executing.
+ *
+ * @return uint64_t Context switch latency in microseconds, 0 if not available.
+ */
+extern uint64_t bthread_switch_latency_us(void);
 
 __END_DECLS
 

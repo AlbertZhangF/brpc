@@ -30,8 +30,15 @@
 #include "bthread/timer_thread.h"
 #include "bthread/list_of_abafree_id.h"
 #include "bthread/bthread.h"
+#include "bvar/bvar.h"
+#include "butil/time.h"
 
 namespace bthread {
+
+// Scheduling latency statistics
+bvar::LatencyRecorder g_sched_latency("bthread_sched_latency");
+bvar::LatencyRecorder g_queue_latency("bthread_queue_latency");
+bvar::LatencyRecorder g_switch_latency("bthread_switch_latency");
 
 static bool validate_bthread_concurrency(const char*, int32_t val) {
     // bthread_setconcurrency sets the flag on success path which should
@@ -644,6 +651,39 @@ uint64_t bthread_cpu_clock_ns(void) {
      bthread::TaskGroup* g = bthread::tls_task_group;
     if (g != NULL && !g->is_current_main_task()) {
         return g->current_task_cpu_clock_ns();
+    }
+    return 0;
+}
+
+uint64_t bthread_sched_latency_us(void) {
+    bthread::TaskGroup* g = bthread::tls_task_group;
+    if (g != NULL && !g->is_current_main_task()) {
+        bthread::TaskMeta* m = g->current_task();
+        if (m->start_exec_us > 0 && m->create_us > 0) {
+            return m->start_exec_us - m->create_us;
+        }
+    }
+    return 0;
+}
+
+uint64_t bthread_queue_latency_us(void) {
+    bthread::TaskGroup* g = bthread::tls_task_group;
+    if (g != NULL && !g->is_current_main_task()) {
+        bthread::TaskMeta* m = g->current_task();
+        if (m->dequeue_us > 0 && m->enqueue_us > 0) {
+            return m->dequeue_us - m->enqueue_us;
+        }
+    }
+    return 0;
+}
+
+uint64_t bthread_switch_latency_us(void) {
+    bthread::TaskGroup* g = bthread::tls_task_group;
+    if (g != NULL && !g->is_current_main_task()) {
+        bthread::TaskMeta* m = g->current_task();
+        if (m->start_exec_us > 0 && m->dequeue_us > 0) {
+            return m->start_exec_us - m->dequeue_us;
+        }
     }
     return 0;
 }

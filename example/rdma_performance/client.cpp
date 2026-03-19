@@ -52,6 +52,9 @@ DEFINE_int32(matrix_size, 0, "Size of the matrix");
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
 bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
+bvar::LatencyRecorder g_bthread_sched_latency("bthread_sched");
+bvar::LatencyRecorder g_bthread_queue_latency("bthread_queue");
+bvar::LatencyRecorder g_bthread_switch_latency("bthread_switch");
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
@@ -172,6 +175,19 @@ public:
         }
 
         g_latency_recorder << closure->cntl->latency_us();
+        // Record bthread scheduling latency
+        uint64_t sched_us = bthread_sched_latency_us();
+        uint64_t queue_us = bthread_queue_latency_us();
+        uint64_t switch_us = bthread_switch_latency_us();
+        if (sched_us > 0) {
+            g_bthread_sched_latency << sched_us;
+        }
+        if (queue_us > 0) {
+            g_bthread_queue_latency << queue_us;
+        }
+        if (switch_us > 0) {
+            g_bthread_switch_latency << switch_us;
+        }
         if (closure->resp->cpu_usage().size() > 0) {
             g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
         }
@@ -272,6 +288,14 @@ void Test(int thread_num, int attachment_size) {
             << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 / (end_time - start_time)) << "k"
             << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "\%"
             << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "\%"
+            << std::endl;
+        // Print bthread scheduling statistics
+        std::cout << "Bthread Sched: Avg: " << g_bthread_sched_latency.latency(10)
+            << "us, P99: " << g_bthread_sched_latency.latency_percentile(0.99)
+            << "us | Queue Wait: Avg: " << g_bthread_queue_latency.latency(10)
+            << "us, P99: " << g_bthread_queue_latency.latency_percentile(0.99)
+            << "us | Context Switch: Avg: " << g_bthread_switch_latency.latency(10)
+            << "us, P99: " << g_bthread_switch_latency.latency_percentile(0.99) << "us"
             << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
