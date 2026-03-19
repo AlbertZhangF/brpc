@@ -169,7 +169,7 @@ public:
     }
 
     void Run() {
-        test::PerformanceTestService_Stub stub(_channel);
+        test::PerfTestService_Stub stub(_channel);
         uint64_t local_bytes = 0;
         uint64_t local_cnt = 0;
 
@@ -181,8 +181,8 @@ public:
                 g_token.fetch_sub(1, butil::memory_order_relaxed);
             }
 
-            test::PerformanceTestRequest req;
-            test::PerformanceTestResponse res;
+            test::PerfTestRequest req;
+            test::PerfTestResponse res;
             brpc::Controller cntl;
             req.set_complexity(FLAGS_complexity);
             req.set_matrix_size(FLAGS_matrix_size);
@@ -190,7 +190,7 @@ public:
                 cntl.request_attachment().append(_attachment);
             }
 
-            stub.PerformanceTest(&cntl, &req, &res, NULL);
+            stub.Test(&cntl, &req, &res, NULL);
             if (!cntl.Failed()) {
                 local_cnt++;
                 local_bytes += _attachment_size;
@@ -200,18 +200,20 @@ public:
                 if (FLAGS_enable_schedule_tracing) {
                     // Parse schedule latency trace info from response attachment
                     const butil::IOBuf& resp_attachment = cntl.response_attachment();
-                    butil::IOBufBytesIterator it(resp_attachment);
-                    const char* data = it.position();
-                    size_t size = resp_attachment.size();
-                    if (size > 0 && data) {
+                    if (!resp_attachment.empty()) {
+                        // Convert entire IOBuf to string to handle multi-segment buffer
+                        std::string attachment_str;
+                        resp_attachment.copy_to(&attachment_str);
+
                         // Look for trace magic prefix
                         const char TRACE_MAGIC[] = "TRACE:";
                         const size_t TRACE_MAGIC_LEN = sizeof(TRACE_MAGIC) - 1;
-                        if (size >= TRACE_MAGIC_LEN && memcmp(data, TRACE_MAGIC, TRACE_MAGIC_LEN) == 0) {
+                        if (attachment_str.size() >= TRACE_MAGIC_LEN &&
+                            memcmp(attachment_str.data(), TRACE_MAGIC, TRACE_MAGIC_LEN) == 0) {
                             // Parse trace info
                             ScheduleTraceInfo info;
-                            const char* trace_data = data + TRACE_MAGIC_LEN;
-                            size_t trace_size = size - TRACE_MAGIC_LEN;
+                            const char* trace_data = attachment_str.data() + TRACE_MAGIC_LEN;
+                            size_t trace_size = attachment_str.size() - TRACE_MAGIC_LEN;
                             std::string trace_str(trace_data, trace_size);
                             // Parse key=value pairs separated by '|'
                             size_t pos = 0;
@@ -247,7 +249,7 @@ public:
                     }
                 }
             } else {
-                if (cntl.ErrorCode() != brpc::ERPCREQUEST && cntl.ErrorCode() != brpc::ERPCRESPONSE) {
+                if (cntl.ErrorCode() != brpc::EREQUEST && cntl.ErrorCode() != brpc::ERESPONSE) {
                     LOG(WARNING) << "PerformanceTest failed: " << cntl.ErrorText();
                 }
             }
@@ -267,12 +269,6 @@ private:
     int _attachment_size;
 };
 
-static void* DeleteTest(void* arg) BAIDU_UNUSED_FUNCTION;
-static void* DeleteTest(void* arg) {
-    PerformanceTest* test = (PerformanceTest*)arg;
-    delete test;
-    return NULL;
-}
 
 void Test(int thread_num, int attachment_size) {
     std::cout << "[Threads: " << thread_num
@@ -340,8 +336,7 @@ void Test(int thread_num, int attachment_size) {
 }
 
 int main(int argc, char* argv[]) {
-    google::ParseCommandLineFlags(&argc, &argv, true);
-    butil::AtExitManager exit_manager;
+    GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
 
     if (FLAGS_use_rdma) {
         brpc::rdma::GlobalRdmaInitializeOrDie();
