@@ -327,6 +327,21 @@ void SendRpcResponse(int64_t correlation_id, Controller* cntl,
         append_body = SerializeResponse(*res, *cntl, res_body);
     }
 
+    // Don't use res->ByteSize() since it may be compressed
+    size_t res_size = 0;
+    size_t attached_size = 0;
+    if (append_body) {
+        res_size = res_body.length();
+        attached_size = cntl->response_attachment().length();
+    }
+
+    int error_code = cntl->ErrorCode();
+    if (error_code == -1) {
+        // replace general error (-1) with INTERNAL_SERVER_ERROR to make a
+        // distinction between server error and client error
+        error_code = EINTERNAL;
+    }
+
     RpcMeta meta;
     RpcResponseMeta* response_meta = meta.mutable_response();
     response_meta->set_error_code(error_code);
