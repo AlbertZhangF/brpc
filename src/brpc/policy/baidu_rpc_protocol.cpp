@@ -56,9 +56,6 @@ DEFINE_int32(schedule_tracing_sampling, 1, "Sample 1 out of N requests for traci
 namespace brpc {
 namespace policy {
 
-// Schedule latency - from ProcessInputMessage to ProcessRpcRequest
-static bvar::LatencyRecorder g_schedule_latency_process_input_to_process_rpc(
-    "brpc_schedule_latency_process_input_to_process_rpc");
 
 DEFINE_bool(baidu_protocol_use_fullname, true,
             "If this flag is true, baidu_std puts service.full_name in requests"

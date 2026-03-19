@@ -446,9 +446,14 @@ void Test(int thread_num, int attachment_size) {
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
 
-    // Register signal handler for printing traces on interrupt
-    signal(SIGINT, PrintTracesOnInterrupt);
-    signal(SIGTERM, PrintTracesOnInterrupt);
+    // 使用sigaction注册信号处理函数，确保可靠触发
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = PrintTracesOnInterrupt;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     // Initialize RDMA environment in advance.
     if (FLAGS_use_rdma) {
@@ -483,6 +488,11 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+
+    // 停止所有服务器，确保程序正常退出
+    brpc::StopAllServers();
+    // 等待所有后台线程退出
+    bthread_usleep(500000);
 
     return 0;
 }
