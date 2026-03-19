@@ -52,6 +52,9 @@ void bthread_assign_data(void* data);
 DEFINE_bool(enable_schedule_tracing, false, "Enable schedule latency tracing and attach to response attachment");
 DEFINE_int32(schedule_tracing_sampling, 1, "Sample 1 out of N requests for tracing");
 
+// Trace magic prefix to distinguish from user attachment data
+const char TRACE_MAGIC[] = "TRACE:";
+const size_t TRACE_MAGIC_LEN = sizeof(TRACE_MAGIC) - 1;
 
 namespace brpc {
 namespace policy {
@@ -871,8 +874,7 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
                         msg_base->process_rpc_ns);
                 if (len > 0 && len < (int)sizeof(trace_buf)) {
                     // Prepend trace marker to avoid conflict with user attachment data
-                    const char TRACE_MAGIC[] = "TRACE:";
-                    cntl->response_attachment().append(TRACE_MAGIC, sizeof(TRACE_MAGIC) - 1);
+                    cntl->response_attachment().append(TRACE_MAGIC, TRACE_MAGIC_LEN);
                     cntl->response_attachment().append(trace_buf, len);
                 }
             }

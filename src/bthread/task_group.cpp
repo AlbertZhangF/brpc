@@ -376,7 +376,7 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
         // Record running timestamp for schedule latency analysis
         m->running_ns = butil::cpuwide_time_ns();
         if (m->input_message_base != nullptr) {
-            static_cast<brpc::InputMessageBase*>(m->input_message_base)->bthread_running_ns = m->running_ns;
+            reinterpret_cast<brpc::InputMessageBase*>(m->input_message_base)->bthread_running_ns = m->running_ns;
         }
 
         if (FLAGS_show_bthread_creation_in_vars) {
@@ -734,7 +734,7 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta, bool cur_ending) {
     // Record scheduled timestamp for schedule latency analysis
     next_meta->scheduled_ns = now;
     if (next_meta->input_message_base != nullptr) {
-        static_cast<brpc::InputMessageBase*>(next_meta->input_message_base)->bthread_scheduled_ns = now;
+        reinterpret_cast<brpc::InputMessageBase*>(next_meta->input_message_base)->bthread_scheduled_ns = now;
     }
     CPUTimeStat cpu_time_stat = g->_cpu_time_stat.load_unsafe();
     int64_t elp_ns = now - cpu_time_stat.last_run_ns();
@@ -841,7 +841,7 @@ void TaskGroup::ready_to_run(TaskMeta* meta, bool nosignal) {
     // Record queued timestamp for schedule latency analysis
     meta->queued_ns = butil::cpuwide_time_ns();
     if (meta->input_message_base != nullptr) {
-        static_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_queued_ns = meta->queued_ns;
+        reinterpret_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_queued_ns = meta->queued_ns;
     }
     push_rq(meta->tid);
     if (nosignal) {
@@ -854,7 +854,7 @@ void TaskGroup::ready_to_run(TaskMeta* meta, bool nosignal) {
         _control->signal_task(1 + additional_signal, _tag);
         // Record signal timestamp
         if (meta->input_message_base != nullptr) {
-            static_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_signaled_ns = signaled_ns;
+            reinterpret_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_signaled_ns = signaled_ns;
             meta->signaled_ns = signaled_ns;
         }
     }
@@ -893,7 +893,7 @@ void TaskGroup::ready_to_run_remote(TaskMeta* meta, bool nosignal) {
         _control->signal_task(1 + additional_signal, _tag);
         // Record signal timestamp
         if (meta->input_message_base != nullptr) {
-            static_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_signaled_ns = signaled_ns;
+            reinterpret_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_signaled_ns = signaled_ns;
             meta->signaled_ns = signaled_ns;
         }
     }

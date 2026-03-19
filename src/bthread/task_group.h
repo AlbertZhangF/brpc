@@ -345,7 +345,7 @@ friend class TaskControl;
             if (tm != nullptr && tm->input_message_base != nullptr) {
                 const uint64_t stolen_ns = butil::cpuwide_time_ns();
                 tm->stolen_ns = stolen_ns;
-                static_cast<brpc::InputMessageBase*>(tm->input_message_base)->bthread_stolen_ns = stolen_ns;
+                reinterpret_cast<brpc::InputMessageBase*>(tm->input_message_base)->bthread_stolen_ns = stolen_ns;
             }
         }
         return stole;
