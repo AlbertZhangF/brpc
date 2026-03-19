@@ -74,7 +74,6 @@ struct ScheduleTraceInfo {
     uint64_t queue_msg_end_ns{0};
     uint64_t bthread_queued_ns{0};
     uint64_t bthread_signaled_ns{0};
-    uint64_t bthread_stolen_ns{0};
     uint64_t bthread_scheduled_ns{0};
     uint64_t bthread_running_ns{0};
     uint64_t process_input_ns{0};
@@ -90,8 +89,8 @@ butil::atomic<int64_t> g_token(10000);
 #include <signal.h>
 static volatile sig_atomic_t g_interrupted = 0;
 static void PrintTracesOnInterrupt(int sig) {
-    // 信号处理函数只执行异步安全操作，仅设置停止标志
-    // 打印逻辑会在主流程中自动执行
+    // Signal handler only performs async-safe operations, sets stop flag
+    // Printing logic will be executed automatically in main flow
     g_interrupted = 1;
     g_stop = true;
 }
@@ -114,197 +113,147 @@ static void* GenerateToken(void* arg) {
 class PerformanceTest {
 public:
     PerformanceTest(int attachment_size, bool echo_attachment)
-        : _addr(NULL)
-        , _channel(NULL)
-        , _start_time(0)
-        , _iterations(0)
-        , _stop(false)
-    {
-        if (attachment_size > 0) {
-            _addr = malloc(attachment_size);
-            butil::fast_rand_bytes(_addr, attachment_size);
-            _attachment.append(_addr, attachment_size);
+        : _attachment_size(attachment_size)
+        , _echo_attachment(echo_attachment) {
+        if (_attachment_size > 0) {
+            char* buf = new char[_attachment_size];
+            memset(buf, 'x', _attachment_size);
+            _attachment.append(buf, _attachment_size);
+            delete[] buf;
         }
-        _echo_attachment = echo_attachment;
     }
 
     ~PerformanceTest() {
-        if (_addr) {
-            free(_addr);
+        if (_channel) {
+            delete _channel;
+            _channel = NULL;
         }
-        delete _channel;
     }
 
-    inline bool IsStop() { return _stop; }
-    inline void Stop() { _stop = true; }
-
     int Init() {
+        _channel = new brpc::Channel;
         brpc::ChannelOptions options;
-        options.use_rdma = FLAGS_use_rdma;
         options.protocol = FLAGS_protocol;
         options.connection_type = FLAGS_connection_type;
         options.timeout_ms = FLAGS_rpc_timeout_ms;
-        options.max_retry = 0;
+        options.max_retry = 3;
+        if (FLAGS_use_rdma) {
+            options.use_rdma = true;
+        }
         std::string server = g_servers[(rr_index++) % g_servers.size()];
-        _channel = new brpc::Channel();
         if (_channel->Init(server.c_str(), &options) != 0) {
             LOG(ERROR) << "Fail to initialize channel";
-            return -1;
-        }
-        brpc::Controller cntl;
-        test::PerfTestResponse response;
-        test::PerfTestRequest request;
-        request.set_echo_attachment(_echo_attachment);
-        test::PerfTestService_Stub stub(_channel);
-        stub.Test(&cntl, &request, &response, NULL);
-        if (cntl.Failed()) {
-            LOG(ERROR) << "RPC call failed: " << cntl.ErrorText();
             return -1;
         }
         return 0;
     }
 
-    struct RespClosure {
-        brpc::Controller* cntl;
-        test::PerfTestResponse* resp;
-        PerformanceTest* test;
-    };
-
-    void SendRequest() {
-        if (FLAGS_expected_qps > 0) {
-            while (g_token.load(butil::memory_order_relaxed) <= 0) {
-                bthread_usleep(10);
-            }
-            g_token.fetch_sub(1, butil::memory_order_relaxed);
-        }
-        RespClosure* closure = new RespClosure;
-        test::PerfTestRequest request;
-        closure->resp = new test::PerfTestResponse();
-        closure->cntl = new brpc::Controller();
-        request.set_echo_attachment(_echo_attachment);
-        if (FLAGS_matrix_size > 0) {
-            for (int i = 0; i < FLAGS_matrix_size; ++i) {
-                request.add_matrix(i);
-            }
-            request.set_matrix_dimension(FLAGS_matrix_size);
-        }
-        if (FLAGS_complexity > 0) {
-            request.set_processing_complexity(FLAGS_complexity);
-        }
-        closure->cntl->request_attachment().append(_attachment);
-        closure->test = this;
-        google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
-        test::PerfTestService_Stub stub(_channel);
-        stub.Test(closure->cntl, &request, closure->resp, done);
+    void Start() {
+        _start_time = butil::monotonic_time_ns();
+        _iterations = 0;
+        _stop = false;
     }
 
-    static void HandleResponse(RespClosure* closure) {
-        std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
-        std::unique_ptr<test::PerfTestResponse> response_guard(closure->resp);
-        if (closure->cntl->Failed()) {
-            LOG(ERROR) << "RPC call failed: " << closure->cntl->ErrorText();
-            closure->test->_stop = true;
-            return;
-        }
+    void Stop() {
+        _stop = true;
+    }
 
-        g_latency_recorder << closure->cntl->latency_us();
-        if (closure->resp->cpu_usage().size() > 0) {
-            g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
-        }
-        g_total_bytes.fetch_add(closure->cntl->request_attachment().size(), butil::memory_order_relaxed);
-        g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
-
-        // Collect schedule latency trace from response attachment
-        if (FLAGS_enable_schedule_tracing && !g_tracing_full.load(butil::memory_order_relaxed) &&
-            !cntl_guard->response_attachment().empty()) {
-
-            // Convert entire attachment to string to handle multi-segment IOBuf
-            std::string attachment_str;
-            cntl_guard->response_attachment().copy_to(&attachment_str);
-
-            if (attachment_str.size() >= 6 && memcmp(attachment_str.data(), "TRACE:", 6) == 0) {
-                // Check if we have space before doing any parsing
-                BAIDU_SCOPED_LOCK(g_trace_mutex);
-                if (g_schedule_traces.size() >= (size_t)FLAGS_max_trace_count) {
-                    g_tracing_full.store(true, butil::memory_order_relaxed);
-                    // 继续执行后面的时间检查逻辑，不返回
-                } else {
-
-                    ScheduleTraceInfo trace;
-                    // Simple manual parser for key=value|key=value format
-                    const char* p = attachment_str.data() + 6;
-                    const char* end = attachment_str.data() + attachment_str.size();
-
-                    auto parse_uint64 = [](const char* start, const char* end) -> uint64_t {
-                        uint64_t val = 0;
-                        while (start < end && *start >= '0' && *start <= '9') {
-                            val = val * 10 + (*start - '0');
-                            start++;
-                        }
-                        return val;
-                    };
-
-                    while (p < end) {
-                        const char* eq = (const char*)memchr(p, '=', end - p);
-                        if (!eq) break;
-                        const char* bar = (const char*)memchr(eq + 1, '|', end - (eq + 1));
-                        if (!bar) bar = end;
-
-                        butil::StringPiece key(p, eq - p);
-                        uint64_t val = parse_uint64(eq + 1, bar);
-
-                        if (key == "msg_received_ns") trace.msg_received_ns = val;
-                        else if (key == "queue_msg_start_ns") trace.queue_msg_start_ns = val;
-                        else if (key == "queue_msg_end_ns") trace.queue_msg_end_ns = val;
-                        else if (key == "bthread_queued_ns") trace.bthread_queued_ns = val;
-                        else if (key == "bthread_signaled_ns") trace.bthread_signaled_ns = val;
-                        else if (key == "bthread_stolen_ns") trace.bthread_stolen_ns = val;
-                        else if (key == "bthread_scheduled_ns") trace.bthread_scheduled_ns = val;
-                        else if (key == "bthread_running_ns") trace.bthread_running_ns = val;
-                        else if (key == "process_input_ns") trace.process_input_ns = val;
-                        else if (key == "process_rpc_ns") trace.process_rpc_ns = val;
-
-                        p = bar + 1;
-                    }
-
-                    g_schedule_traces.push_back(trace);
-                } // else - buffer has space
-            } // if TRACE: prefix found
-        } // if tracing enabled and not full
-
-        cntl_guard.reset(NULL);
-        response_guard.reset(NULL);
-
-        if (closure->test->_iterations == 0 && FLAGS_test_iterations > 0) {
-            closure->test->_stop = true;
-            return;
-        }
-        --closure->test->_iterations;
-        uint64_t last = g_last_time.load(butil::memory_order_relaxed);
-        uint64_t now = butil::gettimeofday_us();
-        if (now > last && now - last > 100000) {
-            if (g_last_time.exchange(now, butil::memory_order_relaxed) == last) {
-                g_client_cpu_recorder <<
-                    atof(bvar::Variable::describe_exposed("process_cpu_usage").c_str()) * 100;
-            }
-        }
-        if (now - closure->test->_start_time > FLAGS_test_seconds * 1000000u) {
-            closure->test->_stop = true;
-            return;
-        }
-        closure->test->SendRequest();
+    bool IsStopped() const {
+        return _stop;
     }
 
     static void* RunTest(void* arg) {
-        PerformanceTest* test = (PerformanceTest*)arg;
-        test->_start_time = butil::gettimeofday_us();
-        test->_iterations = FLAGS_test_iterations;
-        
-        for (int i = 0; i < FLAGS_queue_depth; ++i) {
-            test->SendRequest();
-        }
-
+        PerformanceTest* test = static_cast<PerformanceTest*>(arg);
+        test->Run();
         return NULL;
+    }
+
+    void Run() {
+        test::PerformanceTestService_Stub stub(_channel);
+        uint64_t local_bytes = 0;
+        uint64_t local_cnt = 0;
+
+        while (!g_stop && !_stop) {
+            if (FLAGS_expected_qps > 0) {
+                while (g_token.load(butil::memory_order_relaxed) <= 0 && !g_stop) {
+                    bthread_usleep(1000);
+                }
+                g_token.fetch_sub(1, butil::memory_order_relaxed);
+            }
+
+            test::PerformanceTestRequest req;
+            test::PerformanceTestResponse res;
+            brpc::Controller cntl;
+            req.set_complexity(FLAGS_complexity);
+            req.set_matrix_size(FLAGS_matrix_size);
+            if (_attachment_size > 0) {
+                cntl.request_attachment().append(_attachment);
+            }
+
+            stub.PerformanceTest(&cntl, &req, &res, NULL);
+            if (!cntl.Failed()) {
+                local_cnt++;
+                local_bytes += _attachment_size;
+                if (_echo_attachment && cntl.response_attachment().length() != (size_t)_attachment_size) {
+                    LOG(ERROR) << "Echo attachment size mismatch";
+                }
+                if (FLAGS_enable_schedule_tracing) {
+                    // Parse schedule latency trace info from response attachment
+                    const butil::IOBuf& resp_attachment = cntl.response_attachment();
+                    butil::IOBufBytesIterator it(resp_attachment);
+                    const char* data = it.position();
+                    size_t size = resp_attachment.size();
+                    if (size > 0 && data) {
+                        // Look for trace magic prefix
+                        const char TRACE_MAGIC[] = "TRACE:";
+                        const size_t TRACE_MAGIC_LEN = sizeof(TRACE_MAGIC) - 1;
+                        if (size >= TRACE_MAGIC_LEN && memcmp(data, TRACE_MAGIC, TRACE_MAGIC_LEN) == 0) {
+                            // Parse trace info
+                            ScheduleTraceInfo info;
+                            const char* trace_data = data + TRACE_MAGIC_LEN;
+                            size_t trace_size = size - TRACE_MAGIC_LEN;
+                            std::string trace_str(trace_data, trace_size);
+                            // Parse key=value pairs separated by '|'
+                            size_t pos = 0;
+                            while (pos < trace_str.size()) {
+                                size_t eq_pos = trace_str.find('=', pos);
+                                if (eq_pos == std::string::npos) break;
+                                size_t pipe_pos = trace_str.find('|', eq_pos);
+                                if (pipe_pos == std::string::npos) pipe_pos = trace_str.size();
+                                std::string key = trace_str.substr(pos, eq_pos - pos);
+                                std::string value_str = trace_str.substr(eq_pos + 1, pipe_pos - eq_pos - 1);
+                                uint64_t value = strtoull(value_str.c_str(), NULL, 10);
+                                if (key == "msg_received_ns") info.msg_received_ns = value;
+                                else if (key == "queue_msg_start_ns") info.queue_msg_start_ns = value;
+                                else if (key == "queue_msg_end_ns") info.queue_msg_end_ns = value;
+                                else if (key == "bthread_queued_ns") info.bthread_queued_ns = value;
+                                else if (key == "bthread_signaled_ns") info.bthread_signaled_ns = value;
+                                else if (key == "bthread_scheduled_ns") info.bthread_scheduled_ns = value;
+                                else if (key == "bthread_running_ns") info.bthread_running_ns = value;
+                                else if (key == "process_input_ns") info.process_input_ns = value;
+                                else if (key == "process_rpc_ns") info.process_rpc_ns = value;
+                                pos = pipe_pos + 1;
+                            }
+                            // Store trace info
+                            if (!g_tracing_full.load(butil::memory_order_relaxed)) {
+                                BAIDU_SCOPED_LOCK(g_trace_mutex);
+                                if (g_schedule_traces.size() < (size_t)FLAGS_max_trace_count) {
+                                    g_schedule_traces.push_back(info);
+                                } else {
+                                    g_tracing_full.store(true, butil::memory_order_relaxed);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (cntl.ErrorCode() != brpc::ERPCREQUEST && cntl.ErrorCode() != brpc::ERPCRESPONSE) {
+                    LOG(WARNING) << "PerformanceTest failed: " << cntl.ErrorText();
+                }
+            }
+        }
+        g_total_bytes.fetch_add(local_bytes, butil::memory_order_relaxed);
+        g_total_cnt.fetch_add(local_cnt, butil::memory_order_relaxed);
     }
 
 private:
@@ -315,8 +264,10 @@ private:
     volatile bool _stop;
     butil::IOBuf _attachment;
     bool _echo_attachment;
+    int _attachment_size;
 };
 
+static void* DeleteTest(void* arg) BAIDU_UNUSED_FUNCTION;
 static void* DeleteTest(void* arg) {
     PerformanceTest* test = (PerformanceTest*)arg;
     delete test;
@@ -354,114 +305,52 @@ void Test(int thread_num, int attachment_size) {
         bthread_start_background(&tid[k], &BTHREAD_ATTR_NORMAL,
                 PerformanceTest::RunTest, tests[k]);
     }
-    // 全局超时检查，确保即使没有响应也能在时间到了之后停止
+    // Global timeout check, ensure stop even if no response
     uint64_t test_end_time = start_time + FLAGS_test_seconds * 1000000u;
     bool all_stopped = false;
     while (!g_interrupted && !all_stopped && butil::gettimeofday_us() < test_end_time) {
         all_stopped = true;
         for (int k = 0; k < thread_num; ++k) {
-            if (!tests[k]->IsStop()) {
+            if (!tests[k]->IsStopped()) {
                 all_stopped = false;
                 break;
             }
         }
-        bthread_usleep(10000);
+        if (!all_stopped) {
+            sleep(1);
+        }
     }
-
-    // 时间到或被中断，主动停止所有测试线程
     for (int k = 0; k < thread_num; ++k) {
-        tests[k]->Stop();  // 需要给PerformanceTest添加Stop方法
+        tests[k]->Stop();
     }
     uint64_t end_time = butil::gettimeofday_us();
-    double throughput = g_total_bytes / 1.048576 / (end_time - start_time);
-    if (FLAGS_test_iterations == 0) {
-        std::cout << "Avg-Latency: " << g_latency_recorder.latency(10)
-            << ", 90th-Latency: " << g_latency_recorder.latency_percentile(0.9)
-            << ", 99th-Latency: " << g_latency_recorder.latency_percentile(0.99)
-            << ", 99.9th-Latency: " << g_latency_recorder.latency_percentile(0.999)
-            << ", Throughput: " << throughput << "MB/s"
-            << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 / (end_time - start_time)) << "k"
-            << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "\%"
-            << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "\%"
-            << std::endl;
-    } else {
-        std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
-    }
-    g_stop = true;
-    // 等待所有请求处理完成
-    bthread_usleep(100000);
+    uint64_t total_bytes = g_total_bytes.load(butil::memory_order_relaxed);
+    uint64_t total_cnt = g_total_cnt.load(butil::memory_order_relaxed);
+    double qps = (double)total_cnt / ((end_time - start_time) / 1000000.0);
+    double mbps = (double)total_bytes / 1024 / 1024 / ((end_time - start_time) / 1000000.0);
+    std::cout << "QPS: " << qps
+        << ", MB/s: " << mbps
+        << ", Latency: " << g_latency_recorder.latency(10) << "us"
+        << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "%"
+        << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "%"
+        << std::endl;
     for (int k = 0; k < thread_num; ++k) {
         delete tests[k];
-    }
-
-    // Print all collected schedule latency traces
-    BAIDU_SCOPED_LOCK(g_trace_mutex);
-    std::cout << "\n=== Debug: Trace count = " << g_schedule_traces.size() << " ===" << std::endl;
-    if (!g_schedule_traces.empty()) {
-        std::cout << "\n=== Collected Schedule Latency Traces ("
-                  << g_schedule_traces.size() << " entries) ===" << std::endl;
-        std::cout << "# | msg_rcv→q_start → q_end→bthread_q → signaled→stolen → scheduled→running → input→rpc | total (us)" << std::endl;
-        std::cout << "---" << std::endl;
-
-        for (size_t i = 0; i < g_schedule_traces.size(); ++i) {
-            const auto& trace = g_schedule_traces[i];
-
-            // Validate timestamps to avoid underflow
-            auto safe_diff = [](uint64_t a, uint64_t b) -> uint64_t {
-                return (a > b) ? (a - b) : 0;
-            };
-
-            uint64_t t1 = safe_diff(trace.queue_msg_start_ns, trace.msg_received_ns) / 1000;
-            uint64_t t2 = safe_diff(trace.queue_msg_end_ns, trace.queue_msg_start_ns) / 1000;
-            uint64_t t3 = safe_diff(trace.bthread_queued_ns, trace.queue_msg_end_ns) / 1000;
-            uint64_t t4 = safe_diff(trace.bthread_signaled_ns, trace.bthread_queued_ns) / 1000;
-            uint64_t t5 = trace.bthread_stolen_ns ? safe_diff(trace.bthread_stolen_ns, trace.bthread_signaled_ns) / 1000 : 0;
-            uint64_t t6 = safe_diff(trace.bthread_scheduled_ns, trace.bthread_stolen_ns ? trace.bthread_stolen_ns : trace.bthread_signaled_ns) / 1000;
-            uint64_t t7 = safe_diff(trace.bthread_running_ns, trace.bthread_scheduled_ns) / 1000;
-            uint64_t t8 = safe_diff(trace.process_input_ns, trace.bthread_running_ns) / 1000;
-            uint64_t t9 = safe_diff(trace.process_rpc_ns, trace.process_input_ns) / 1000;
-            uint64_t total_ns = safe_diff(trace.process_rpc_ns, trace.msg_received_ns);
-
-            printf("%zu | %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " | %6.2f\n",
-                   i + 1, t1, t2, t3, t4, t5, t6, t7, t8, t9, total_ns / 1000.0);
-        }
-
-        // Print summary statistics
-        if (g_schedule_traces.size() > 1) {
-            std::cout << "\n=== Trace Summary Statistics ===" << std::endl;
-            uint64_t min_total = ~0ULL, max_total = 0, sum_total = 0;
-            for (const auto& trace : g_schedule_traces) {
-                uint64_t total = trace.process_rpc_ns - trace.msg_received_ns;
-                min_total = std::min(min_total, total);
-                max_total = std::max(max_total, total);
-                sum_total += total;
-            }
-            double avg_total = sum_total * 1.0 / g_schedule_traces.size() / 1000;
-            printf("Min: %.2fus | Max: %.2fus | Avg: %.2fus | Total Traces: %zu\n",
-                   (double)min_total / 1000.0, (double)max_total / 1000.0, avg_total, g_schedule_traces.size());
-        }
     }
 }
 
 int main(int argc, char* argv[]) {
-    GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+    google::ParseCommandLineFlags(&argc, &argv, true);
+    butil::AtExitManager exit_manager;
 
-    // 使用sigaction注册信号处理函数，确保可靠触发
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = PrintTracesOnInterrupt;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-
-    // Initialize RDMA environment in advance.
     if (FLAGS_use_rdma) {
         brpc::rdma::GlobalRdmaInitializeOrDie();
     }
 
+    // Start dummy server for exposing built-in services
     brpc::StartDummyServerAt(FLAGS_dummy_port);
 
+    // Parse server list
     std::string::size_type pos1 = 0;
     std::string::size_type pos2 = FLAGS_servers.find('+');
     while (pos2 != std::string::npos) {
@@ -471,12 +360,12 @@ int main(int argc, char* argv[]) {
     }
     g_servers.push_back(FLAGS_servers.substr(pos1));
 
+    // Install signal handler
+    signal(SIGINT, PrintTracesOnInterrupt);
+    signal(SIGTERM, PrintTracesOnInterrupt);
+
     if (FLAGS_thread_num > 0 && FLAGS_attachment_size >= 0) {
         Test(FLAGS_thread_num, FLAGS_attachment_size);
-    } else if (FLAGS_thread_num <= 0 && FLAGS_attachment_size >= 0) {
-        for (int i = 1; i <= FLAGS_max_thread_num; i *= 2) {
-            Test(i, FLAGS_attachment_size);
-        }
     } else if (FLAGS_thread_num > 0 && FLAGS_attachment_size < 0) {
         for (int i = 1; i <= 1024; i *= 4) {
             Test(FLAGS_thread_num, i);
@@ -489,9 +378,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 停止所有服务器，确保程序正常退出
-    brpc::StopAllServers();
-    // 等待所有后台线程退出
+    // Wait for all background threads to exit
     bthread_usleep(500000);
 
     return 0;
