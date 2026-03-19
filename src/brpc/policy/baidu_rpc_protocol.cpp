@@ -28,6 +28,7 @@
 #include "butil/memory/scope_guard.h"
 #include "json2pb/json_to_pb.h"
 #include "json2pb/pb_to_json.h"
+#include "brpc/log.h"                            // RPC_VLOG
 #include "brpc/controller.h"                    // Controller
 #include "brpc/socket.h"                        // Socket
 #include "brpc/server.h"                        // Server
@@ -845,29 +846,27 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
 
             // Apply sampling
             if (count % FLAGS_schedule_tracing_sampling == 0) {
-                // VLOG automatically checks FLAGS_v level, no need for manual check
-                VLOG(1) << "ScheduleLatencyTrace:"
-                        << " msg_received_ns=" << msg_base->msg_received_ns
-                        << " queue_msg_start_ns=" << msg_base->queue_msg_start_ns
-                        << " queue_msg_end_ns=" << msg_base->queue_msg_end_ns
-                        << " bthread_queued_ns=" << msg_base->bthread_queued_ns
-                        << " bthread_signaled_ns=" << msg_base->bthread_signaled_ns
-                        << " bthread_stolen_ns=" << msg_base->bthread_stolen_ns
-                        << " bthread_scheduled_ns=" << msg_base->bthread_scheduled_ns
-                        << " bthread_running_ns=" << msg_base->bthread_running_ns
-                        << " process_input_ns=" << msg_base->process_input_ns
-                        << " process_rpc_ns=" << msg_base->process_rpc_ns;
+                // Use RPC_VLOG which is the standard logging macro in brpc
+                RPC_VLOG << "ScheduleLatencyTrace:"
+                         << " msg_received_ns=" << msg_base->msg_received_ns
+                         << " queue_msg_start_ns=" << msg_base->queue_msg_start_ns
+                         << " queue_msg_end_ns=" << msg_base->queue_msg_end_ns
+                         << " bthread_queued_ns=" << msg_base->bthread_queued_ns
+                         << " bthread_signaled_ns=" << msg_base->bthread_signaled_ns
+                         << " bthread_scheduled_ns=" << msg_base->bthread_scheduled_ns
+                         << " bthread_running_ns=" << msg_base->bthread_running_ns
+                         << " process_input_ns=" << msg_base->process_input_ns
+                         << " process_rpc_ns=" << msg_base->process_rpc_ns;
 
                 // Append trace info to response attachment
                 char trace_buf[512];
                 int len = snprintf(trace_buf, sizeof(trace_buf),
-                        "msg_received_ns=%" PRIu64 "|queue_msg_start_ns=%" PRIu64 "|queue_msg_end_ns=%" PRIu64 "|bthread_queued_ns=%" PRIu64 "|bthread_signaled_ns=%" PRIu64 "|bthread_stolen_ns=%" PRIu64 "|bthread_scheduled_ns=%" PRIu64 "|bthread_running_ns=%" PRIu64 "|process_input_ns=%" PRIu64 "|process_rpc_ns=%" PRIu64,
+                        "msg_received_ns=%" PRIu64 "|queue_msg_start_ns=%" PRIu64 "|queue_msg_end_ns=%" PRIu64 "|bthread_queued_ns=%" PRIu64 "|bthread_signaled_ns=%" PRIu64 "|bthread_scheduled_ns=%" PRIu64 "|bthread_running_ns=%" PRIu64 "|process_input_ns=%" PRIu64 "|process_rpc_ns=%" PRIu64,
                         msg_base->msg_received_ns,
                         msg_base->queue_msg_start_ns,
                         msg_base->queue_msg_end_ns,
                         msg_base->bthread_queued_ns,
                         msg_base->bthread_signaled_ns,
-                        msg_base->bthread_stolen_ns,
                         msg_base->bthread_scheduled_ns,
                         msg_base->bthread_running_ns,
                         msg_base->process_input_ns,

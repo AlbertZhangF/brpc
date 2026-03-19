@@ -103,11 +103,11 @@ struct TaskMeta {
     TaskStatistics stat{};
 
     // For detailed schedule latency analysis (unit: ns)
-    // Pointer to InputMessageBase to record timestamps back
+    // These timestamps track the scheduling path from message received to processing
+    // Set to 0 if not tracking to minimize overhead
     void* input_message_base{nullptr};
-    uint64_t queued_ns{0};       // Time when task was queued
+    uint64_t queued_ns{0};       // Time when task was queued (ready_to_run)
     uint64_t signaled_ns{0};     // Time when signal_task was called
-    uint64_t stolen_ns{0};       // Time when task was stolen/retrieved by worker
     uint64_t scheduled_ns{0};    // Time when sched_to completed
     uint64_t running_ns{0};      // Time when task_runner started
 

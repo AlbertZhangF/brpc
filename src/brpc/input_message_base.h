@@ -50,13 +50,13 @@ public:
 
 public:
     // For schedule latency analysis (unit: ns)
-    // Time points in the scheduling path from message received to processing
+    // These timestamps track the scheduling path from message received to processing
+    // All timestamps are set to 0 by default and only populated when tracking is enabled
     uint64_t msg_received_ns{0};      // Message received (cut complete)
     uint64_t queue_msg_start_ns{0};   // QueueMessage start
     uint64_t queue_msg_end_ns{0};     // QueueMessage end (bthread_start_background returned)
     uint64_t bthread_queued_ns{0};    // bthread queued (ready_to_run done)
     uint64_t bthread_signaled_ns{0};  // signal_task called
-    uint64_t bthread_stolen_ns{0};    // Task stolen by worker
     uint64_t bthread_scheduled_ns{0}; // sched_to completed
     uint64_t bthread_running_ns{0};   // task_runner started
     uint64_t process_input_ns{0};     // ProcessInputMessage started

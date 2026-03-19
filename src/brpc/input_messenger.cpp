@@ -31,6 +31,7 @@
 #include "brpc/protocol.h"                 // ListProtocols
 #include "brpc/rdma/rdma_endpoint.h"
 #include "brpc/input_messenger.h"
+#include "brpc/log.h"                      // RPC_VLOG
 
 
 namespace brpc {
@@ -39,22 +40,23 @@ InputMessenger* g_messenger = NULL;
 static pthread_once_t g_messenger_init = PTHREAD_ONCE_INIT;
 
 // Schedule latency bvars - record latencies in each stage (unit: us)
+// These bvars follow brpc's standard naming convention for metrics
 static bvar::LatencyRecorder g_schedule_latency_received_to_queue_start(
-    "brpc_schedule_latency_received_to_queue_start");
+    "bthread_schedule_latency_received_to_queue_start");
 static bvar::LatencyRecorder g_schedule_latency_queue_start_to_queue_end(
-    "brpc_schedule_latency_queue_start_to_queue_end");
+    "bthread_schedule_latency_queue_start_to_queue_end");
 static bvar::LatencyRecorder g_schedule_latency_queue_end_to_queued(
-    "brpc_schedule_latency_queue_end_to_queued");
+    "bthread_schedule_latency_queue_end_to_queued");
 static bvar::LatencyRecorder g_schedule_latency_queued_to_scheduled(
-    "brpc_schedule_latency_queued_to_scheduled");
+    "bthread_schedule_latency_queued_to_scheduled");
 static bvar::LatencyRecorder g_schedule_latency_scheduled_to_running(
-    "brpc_schedule_latency_scheduled_to_running");
+    "bthread_schedule_latency_scheduled_to_running");
 static bvar::LatencyRecorder g_schedule_latency_running_to_process_input(
-    "brpc_schedule_latency_running_to_process_input");
+    "bthread_schedule_latency_running_to_process_input");
 static bvar::LatencyRecorder g_schedule_latency_process_input_to_process_rpc(
-    "brpc_schedule_latency_process_input_to_process_rpc");
+    "bthread_schedule_latency_process_input_to_process_rpc");
 static bvar::LatencyRecorder g_schedule_latency_total(
-    "brpc_schedule_latency_total");
+    "bthread_schedule_latency_total");
 
 static void InitClientSideMessenger() {
     g_messenger = new InputMessenger;

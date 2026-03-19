@@ -504,6 +504,7 @@ int TaskGroup::start_foreground(TaskGroup** pg,
     }
     m->cpuwide_start_ns = start_ns;
     // Set input_message_base from TLS if available (for schedule latency analysis)
+    // This enables tracking of the scheduling path from message received to processing
     if (TaskMeta::tls_input_message_base != nullptr) {
         m->input_message_base = TaskMeta::tls_input_message_base;
         TaskMeta::tls_input_message_base = nullptr;  // Reset to nullptr
@@ -574,6 +575,7 @@ int TaskGroup::start_background(bthread_t* __restrict th,
     }
     m->cpuwide_start_ns = start_ns;
     // Set input_message_base from TLS if available (for schedule latency analysis)
+    // This enables tracking of the scheduling path from message received to processing
     if (TaskMeta::tls_input_message_base != nullptr) {
         m->input_message_base = TaskMeta::tls_input_message_base;
         TaskMeta::tls_input_message_base = nullptr;  // Reset to nullptr
@@ -839,8 +841,9 @@ void TaskGroup::ready_to_run(TaskMeta* meta, bool nosignal) {
     _control->_task_tracer.set_status(TASK_STATUS_READY, meta);
 #endif // BRPC_BTHREAD_TRACER
     // Record queued timestamp for schedule latency analysis
-    meta->queued_ns = butil::cpuwide_time_ns();
-    if (meta->input_message_base != nullptr) {
+    // Only record if input_message_base is set to minimize overhead
+    if (BAIDU_UNLIKELY(meta->input_message_base != nullptr)) {
+        meta->queued_ns = butil::cpuwide_time_ns();
         reinterpret_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_queued_ns = meta->queued_ns;
     }
     push_rq(meta->tid);
@@ -850,10 +853,10 @@ void TaskGroup::ready_to_run(TaskMeta* meta, bool nosignal) {
         const int additional_signal = _num_nosignal;
         _num_nosignal = 0;
         _nsignaled += 1 + additional_signal;
-        const uint64_t signaled_ns = butil::cpuwide_time_ns();
         _control->signal_task(1 + additional_signal, _tag);
-        // Record signal timestamp
-        if (meta->input_message_base != nullptr) {
+        // Record signal timestamp if tracking
+        if (BAIDU_UNLIKELY(meta->input_message_base != nullptr)) {
+            const uint64_t signaled_ns = butil::cpuwide_time_ns();
             reinterpret_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_signaled_ns = signaled_ns;
             meta->signaled_ns = signaled_ns;
         }
@@ -889,10 +892,10 @@ void TaskGroup::ready_to_run_remote(TaskMeta* meta, bool nosignal) {
         _remote_num_nosignal = 0;
         _remote_nsignaled += 1 + additional_signal;
         _remote_rq._mutex.unlock();
-        const uint64_t signaled_ns = butil::cpuwide_time_ns();
         _control->signal_task(1 + additional_signal, _tag);
-        // Record signal timestamp
-        if (meta->input_message_base != nullptr) {
+        // Record signal timestamp if tracking
+        if (BAIDU_UNLIKELY(meta->input_message_base != nullptr)) {
+            const uint64_t signaled_ns = butil::cpuwide_time_ns();
             reinterpret_cast<brpc::InputMessageBase*>(meta->input_message_base)->bthread_signaled_ns = signaled_ns;
             meta->signaled_ns = signaled_ns;
         }
