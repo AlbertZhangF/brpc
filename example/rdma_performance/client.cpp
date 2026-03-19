@@ -184,8 +184,6 @@ public:
             test::PerfTestRequest req;
             test::PerfTestResponse res;
             brpc::Controller cntl;
-            req.set_complexity(FLAGS_complexity);
-            req.set_matrix_size(FLAGS_matrix_size);
             if (_attachment_size > 0) {
                 cntl.request_attachment().append(_attachment);
             }
