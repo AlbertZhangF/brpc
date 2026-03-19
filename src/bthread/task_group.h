@@ -339,15 +339,6 @@ friend class TaskControl;
 #endif
             stole = _control->steal_task(tid, &_steal_seed, _steal_offset);
         }
-        
-        if (stole) {
-            TaskMeta* tm = address_meta(*tid);
-            if (tm != nullptr && tm->input_message_base != nullptr) {
-                const uint64_t stolen_ns = butil::cpuwide_time_ns();
-                tm->stolen_ns = stolen_ns;
-                reinterpret_cast<brpc::InputMessageBase*>(tm->input_message_base)->bthread_stolen_ns = stolen_ns;
-            }
-        }
         return stole;
     }
 
