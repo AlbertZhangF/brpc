@@ -53,8 +53,6 @@ static bvar::LatencyRecorder g_schedule_latency_scheduled_to_running(
     "bthread_schedule_latency_scheduled_to_running");
 static bvar::LatencyRecorder g_schedule_latency_running_to_process_input(
     "bthread_schedule_latency_running_to_process_input");
-static bvar::LatencyRecorder g_schedule_latency_process_input_to_process_rpc(
-    "bthread_schedule_latency_process_input_to_process_rpc");
 static bvar::LatencyRecorder g_schedule_latency_total(
     "bthread_schedule_latency_total");
 

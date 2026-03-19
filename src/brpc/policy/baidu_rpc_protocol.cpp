@@ -574,13 +574,6 @@ bool DeserializeRpcMessage(const butil::IOBuf& data, Controller& cntl,
 
 void ProcessRpcRequest(InputMessageBase* msg_base) {
     msg_base->process_rpc_ns = butil::cpuwide_time_ns();
-    // Record latency from ProcessInputMessage to ProcessRpcRequest
-    if (msg_base->process_input_ns != 0) {
-        const int64_t lat = (msg_base->process_rpc_ns - msg_base->process_input_ns) / 1000L;
-        if (lat > 0) {
-            g_schedule_latency_process_input_to_process_rpc << lat;
-        }
-    }
     const int64_t start_parse_us = butil::cpuwide_time_us();
     DestroyingPtr<MostCommonMessage> msg(static_cast<MostCommonMessage*>(msg_base));
     SocketUniquePtr socket_guard(msg->ReleaseSocket());
