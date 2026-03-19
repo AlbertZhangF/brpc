@@ -920,6 +920,49 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
             req_buf.clear();
         }
 
+        // Add schedule latency tracing info to response attachment before callback
+        if (FLAGS_enable_schedule_tracing && msg_base->msg_received_ns != 0) {
+            static butil::atomic<uint64_t> s_tracing_counter{0};
+            uint64_t count = s_tracing_counter.fetch_add(1, butil::memory_order_relaxed);
+
+            // Apply sampling
+            if (count % FLAGS_schedule_tracing_sampling == 0) {
+                // VLOG automatically checks FLAGS_v level, no need for manual check
+                VLOG(1) << "ScheduleLatencyTrace:"
+                        << " msg_received_ns=" << msg_base->msg_received_ns
+                        << " queue_msg_start_ns=" << msg_base->queue_msg_start_ns
+                        << " queue_msg_end_ns=" << msg_base->queue_msg_end_ns
+                        << " bthread_queued_ns=" << msg_base->bthread_queued_ns
+                        << " bthread_signaled_ns=" << msg_base->bthread_signaled_ns
+                        << " bthread_stolen_ns=" << msg_base->bthread_stolen_ns
+                        << " bthread_scheduled_ns=" << msg_base->bthread_scheduled_ns
+                        << " bthread_running_ns=" << msg_base->bthread_running_ns
+                        << " process_input_ns=" << msg_base->process_input_ns
+                        << " process_rpc_ns=" << msg_base->process_rpc_ns;
+
+                // Append trace info to response attachment
+                char trace_buf[512];
+                int len = snprintf(trace_buf, sizeof(trace_buf),
+                        "msg_received_ns=%" PRIu64 "|queue_msg_start_ns=%" PRIu64 "|queue_msg_end_ns=%" PRIu64 "|bthread_queued_ns=%" PRIu64 "|bthread_signaled_ns=%" PRIu64 "|bthread_stolen_ns=%" PRIu64 "|bthread_scheduled_ns=%" PRIu64 "|bthread_running_ns=%" PRIu64 "|process_input_ns=%" PRIu64 "|process_rpc_ns=%" PRIu64,
+                        msg_base->msg_received_ns,
+                        msg_base->queue_msg_start_ns,
+                        msg_base->queue_msg_end_ns,
+                        msg_base->bthread_queued_ns,
+                        msg_base->bthread_signaled_ns,
+                        msg_base->bthread_stolen_ns,
+                        msg_base->bthread_scheduled_ns,
+                        msg_base->bthread_running_ns,
+                        msg_base->process_input_ns,
+                        msg_base->process_rpc_ns);
+                if (len > 0 && len < (int)sizeof(trace_buf)) {
+                    // Prepend trace marker to avoid conflict with user attachment data
+                    const char TRACE_MAGIC[] = "TRACE:";
+                    cntl->response_attachment().append(TRACE_MAGIC, sizeof(TRACE_MAGIC) - 1);
+                    cntl->response_attachment().append(trace_buf, len);
+                }
+            }
+        }
+
         // `socket' will be held until response has been sent
         google::protobuf::Closure* done = ::brpc::NewCallback<
             int64_t, Controller*, RpcPBMessages*,
