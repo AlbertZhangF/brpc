@@ -87,46 +87,13 @@ butil::atomic<bool> g_tracing_full{false};
 butil::atomic<int64_t> g_token(10000);
 
 // Signal handler for printing traces on interrupt
-static volatile bool g_interrupted = false;
+#include <signal.h>
+static volatile sig_atomic_t g_interrupted = 0;
 static void PrintTracesOnInterrupt(int sig) {
-    g_interrupted = true;
-    g_stop = true;  // Stop all threads
-    // Print traces before exiting
-    BAIDU_SCOPED_LOCK(g_trace_mutex);
-    if (!g_schedule_traces.empty()) {
-        std::cout << "\n=== Collected Schedule Latency Traces (" << g_schedule_traces.size() << " entries) ===" << std::endl;
-        std::cout << "# | msg_rcv→q_start → q_end→bthread_q → signaled→stolen → scheduled→running → input→rpc | total (us)" << std::endl;
-        std::cout << "---" << std::endl;
-        for (size_t i = 0; i < g_schedule_traces.size(); ++i) {
-            const auto& trace = g_schedule_traces[i];
-            auto safe_diff = [](uint64_t a, uint64_t b) -> uint64_t { return (a > b) ? (a - b) : 0; };
-            uint64_t t1 = safe_diff(trace.queue_msg_start_ns, trace.msg_received_ns) / 1000;
-            uint64_t t2 = safe_diff(trace.queue_msg_end_ns, trace.queue_msg_start_ns) / 1000;
-            uint64_t t3 = safe_diff(trace.bthread_queued_ns, trace.queue_msg_end_ns) / 1000;
-            uint64_t t4 = safe_diff(trace.bthread_signaled_ns, trace.bthread_queued_ns) / 1000;
-            uint64_t t5 = trace.bthread_stolen_ns ? safe_diff(trace.bthread_stolen_ns, trace.bthread_signaled_ns) / 1000 : 0;
-            uint64_t t6 = safe_diff(trace.bthread_scheduled_ns, trace.bthread_stolen_ns ? trace.bthread_stolen_ns : trace.bthread_signaled_ns) / 1000;
-            uint64_t t7 = safe_diff(trace.bthread_running_ns, trace.bthread_scheduled_ns) / 1000;
-            uint64_t t8 = safe_diff(trace.process_input_ns, trace.bthread_running_ns) / 1000;
-            uint64_t t9 = safe_diff(trace.process_rpc_ns, trace.process_input_ns) / 1000;
-            uint64_t total_ns = safe_diff(trace.process_rpc_ns, trace.msg_received_ns);
-            printf("%zu | %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " → %6" PRIu64 " | %6.2f\n",
-                   i + 1, t1, t2, t3, t4, t5, t6, t7, t8, t9, total_ns / 1000.0);
-        }
-        if (g_schedule_traces.size() > 1) {
-            std::cout << "\n=== Trace Summary Statistics ===" << std::endl;
-            uint64_t min_total = ~0ULL, max_total = 0, sum_total = 0;
-            for (const auto& trace : g_schedule_traces) {
-                uint64_t total = trace.process_rpc_ns - trace.msg_received_ns;
-                min_total = std::min(min_total, total);
-                max_total = std::max(max_total, total);
-                sum_total += total;
-            }
-            double avg_total = sum_total * 1.0 / g_schedule_traces.size() / 1000;
-            printf("Min: %.2fus | Max: %.2fus | Avg: %.2fus | Total Traces: %zu\n",
-                   (double)min_total / 1000.0, (double)max_total / 1000.0, avg_total, g_schedule_traces.size());
-        }
-    }
+    // 信号处理函数只执行异步安全操作，仅设置停止标志
+    // 打印逻辑会在主流程中自动执行
+    g_interrupted = 1;
+    g_stop = true;
 }
 
 static void* GenerateToken(void* arg) {
@@ -169,6 +136,7 @@ public:
     }
 
     inline bool IsStop() { return _stop; }
+    inline void Stop() { _stop = true; }
 
     int Init() {
         brpc::ChannelOptions options;
@@ -259,7 +227,7 @@ public:
                 BAIDU_SCOPED_LOCK(g_trace_mutex);
                 if (g_schedule_traces.size() >= (size_t)FLAGS_max_trace_count) {
                     g_tracing_full.store(true, butil::memory_order_relaxed);
-                    // Don't return here - continue to process time check logic below
+                    // 继续执行后面的时间检查逻辑，不返回
                 } else {
 
                     ScheduleTraceInfo trace;
@@ -386,10 +354,23 @@ void Test(int thread_num, int attachment_size) {
         bthread_start_background(&tid[k], &BTHREAD_ATTR_NORMAL,
                 PerformanceTest::RunTest, tests[k]);
     }
-    for (int k = 0; k < thread_num; ++k) {
-        while (!tests[k]->IsStop()) {
-            bthread_usleep(10000);
+    // 全局超时检查，确保即使没有响应也能在时间到了之后停止
+    uint64_t test_end_time = start_time + FLAGS_test_seconds * 1000000u;
+    bool all_stopped = false;
+    while (!g_interrupted && !all_stopped && butil::gettimeofday_us() < test_end_time) {
+        all_stopped = true;
+        for (int k = 0; k < thread_num; ++k) {
+            if (!tests[k]->IsStop()) {
+                all_stopped = false;
+                break;
+            }
         }
+        bthread_usleep(10000);
+    }
+
+    // 时间到或被中断，主动停止所有测试线程
+    for (int k = 0; k < thread_num; ++k) {
+        tests[k]->Stop();  // 需要给PerformanceTest添加Stop方法
     }
     uint64_t end_time = butil::gettimeofday_us();
     double throughput = g_total_bytes / 1.048576 / (end_time - start_time);
@@ -407,12 +388,15 @@ void Test(int thread_num, int attachment_size) {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
     }
     g_stop = true;
+    // 等待所有请求处理完成
+    bthread_usleep(100000);
     for (int k = 0; k < thread_num; ++k) {
-        bthread_start_background(&tid[k], &BTHREAD_ATTR_NORMAL, DeleteTest, tests[k]);
+        delete tests[k];
     }
 
     // Print all collected schedule latency traces
     BAIDU_SCOPED_LOCK(g_trace_mutex);
+    std::cout << "\n=== Debug: Trace count = " << g_schedule_traces.size() << " ===" << std::endl;
     if (!g_schedule_traces.empty()) {
         std::cout << "\n=== Collected Schedule Latency Traces ("
                   << g_schedule_traces.size() << " entries) ===" << std::endl;
