@@ -182,18 +182,18 @@ public:
         }
 
         g_latency_recorder << closure->cntl->latency_us();
-        // Record bthread scheduling latency (ns -> us for easier reading)
+        // Record bthread scheduling latency (nanoseconds)
         uint64_t sched_ns = bthread_sched_latency_ns();
         uint64_t queue_ns = bthread_queue_latency_ns();
         uint64_t switch_ns = bthread_switch_latency_ns();
         if (sched_ns > 0) {
-            g_bthread_sched_latency << sched_ns / 1000; // store as us
+            g_bthread_sched_latency << sched_ns; // store as ns
         }
         if (queue_ns > 0) {
-            g_bthread_queue_latency << queue_ns / 1000; // store as us
+            g_bthread_queue_latency << queue_ns; // store as ns
         }
         if (switch_ns > 0) {
-            g_bthread_switch_latency << switch_ns / 1000; // store as us
+            g_bthread_switch_latency << switch_ns; // store as ns
         }
         if (closure->resp->cpu_usage().size() > 0) {
             g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
@@ -298,11 +298,11 @@ void Test(int thread_num, int attachment_size) {
             << std::endl;
         // Print bthread scheduling statistics
         std::cout << "Bthread Sched: Avg: " << g_bthread_sched_latency.latency(10)
-            << "us, P99: " << g_bthread_sched_latency.latency_percentile(0.99)
-            << "us | Queue Wait: Avg: " << g_bthread_queue_latency.latency(10)
-            << "us, P99: " << g_bthread_queue_latency.latency_percentile(0.99)
-            << "us | Context Switch: Avg: " << g_bthread_switch_latency.latency(10)
-            << "us, P99: " << g_bthread_switch_latency.latency_percentile(0.99) << "us"
+            << "ns, P99: " << g_bthread_sched_latency.latency_percentile(0.99)
+            << "ns | Queue Wait: Avg: " << g_bthread_queue_latency.latency(10)
+            << "ns, P99: " << g_bthread_queue_latency.latency_percentile(0.99)
+            << "ns | Context Switch: Avg: " << g_bthread_switch_latency.latency(10)
+            << "ns, P99: " << g_bthread_switch_latency.latency_percentile(0.99) << "ns"
             << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
