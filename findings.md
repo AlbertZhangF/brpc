@@ -38,6 +38,8 @@
 ## Issues Encountered
 | Issue | Resolution |
 |-------|------------|
+| 统计出现负数时间 | TaskMeta对象从资源池复用，旧的时间戳未清零，需要在start_background中初始化时间戳为0 |
+| 时间精度不足 | 原使用us单位，改为ns单位，提高统计精度 |
 
 ## Resources
 - [bthread文档](docs/cn/bthread.md)

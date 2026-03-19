@@ -116,10 +116,10 @@ struct TaskMeta {
     pthread_t worker_tid{};
 
     // Scheduling latency statistics
-    uint64_t create_us;       // Task creation time (us)
-    uint64_t enqueue_us;      // Time when task is added to runqueue (us)
-    uint64_t dequeue_us;      // Time when task is removed from runqueue (us)
-    uint64_t start_exec_us;   // Time when task starts execution (us)
+    uint64_t create_ns;       // Task creation time (ns)
+    uint64_t enqueue_ns;      // Time when task is added to runqueue (ns)
+    uint64_t dequeue_ns;      // Time when task is removed from runqueue (ns)
+    uint64_t start_exec_ns;   // Time when task starts execution (ns)
 
 public:
     // Only initialize [Not Reset] fields, other fields will be reset in

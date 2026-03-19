@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 4
+Phase 7
 
 ## Phases
 
@@ -61,6 +61,13 @@ Phase 4
 - [ ] 整理统计结果说明
 - [ ] 提供使用说明文档
 - **Status:** pending
+
+### Phase 7: Bug修复与单位调整
+- [ ] 修复负数时间统计bug（TaskMeta复用导致旧时间戳未清零）
+- [ ] 将所有时间统计单位从微秒(us)改为纳秒(ns)，提高统计精度
+- [ ] 修正接口返回值和输出格式，适配ns单位
+- [ ] 重新编译测试验证修复效果
+- **Status:** in_progress
 
 ## Decisions Made
 | Decision | Rationale |

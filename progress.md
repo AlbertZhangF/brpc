@@ -33,6 +33,12 @@
      - 在HandleResponse回调中调用新增的接口获取调度耗时并记录
      - 在测试结束后的输出中添加bthread调度相关的Avg和P99时延统计，与原有格式保持一致
 4. 更新task_plan.md，标记Phase 3完成，进入Phase 4测试验证阶段
+5. 修复测试中发现的bug：
+   - 负数时间bug：TaskMeta从对象池复用，旧时间戳未清零，在start_background中新增初始化逻辑，将四个时间戳清零
+   - 时间单位调整：将所有时间统计从us改为ns，提高精度
+   - 调整接口：将bthread_sched_latency_us等接口改为bthread_sched_latency_ns，返回ns单位
+   - 调整client输出：统计时将ns转换为us存储，保持输出可读性
+6. 所有修改已完成，等待重新编译测试
 
 ### Test Results
 | Test | Expected | Actual | Status |

@@ -175,18 +175,18 @@ public:
         }
 
         g_latency_recorder << closure->cntl->latency_us();
-        // Record bthread scheduling latency
-        uint64_t sched_us = bthread_sched_latency_us();
-        uint64_t queue_us = bthread_queue_latency_us();
-        uint64_t switch_us = bthread_switch_latency_us();
-        if (sched_us > 0) {
-            g_bthread_sched_latency << sched_us;
+        // Record bthread scheduling latency (ns -> us for easier reading)
+        uint64_t sched_ns = bthread_sched_latency_ns();
+        uint64_t queue_ns = bthread_queue_latency_ns();
+        uint64_t switch_ns = bthread_switch_latency_ns();
+        if (sched_ns > 0) {
+            g_bthread_sched_latency << sched_ns / 1000; // store as us
         }
-        if (queue_us > 0) {
-            g_bthread_queue_latency << queue_us;
+        if (queue_ns > 0) {
+            g_bthread_queue_latency << queue_ns / 1000; // store as us
         }
-        if (switch_us > 0) {
-            g_bthread_switch_latency << switch_us;
+        if (switch_ns > 0) {
+            g_bthread_switch_latency << switch_ns / 1000; // store as us
         }
         if (closure->resp->cpu_usage().size() > 0) {
             g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;

@@ -431,32 +431,32 @@ extern uint64_t bthread_cpu_clock_ns(void);
 /**
  * @brief Retrieves the total scheduling latency of the current bthread.
  *
- * This function returns the total time (in microseconds) from when the bthread
+ * This function returns the total time (in nanoseconds) from when the bthread
  * was created to when it started executing.
  *
- * @return uint64_t Total scheduling latency in microseconds, 0 if not available.
+ * @return uint64_t Total scheduling latency in nanoseconds, 0 if not available.
  */
-extern uint64_t bthread_sched_latency_us(void);
+extern uint64_t bthread_sched_latency_ns(void);
 
 /**
  * @brief Retrieves the queue wait latency of the current bthread.
  *
- * This function returns the time (in microseconds) the bthread spent waiting
+ * This function returns the time (in nanoseconds) the bthread spent waiting
  * in the runqueue before being scheduled.
  *
- * @return uint64_t Queue wait latency in microseconds, 0 if not available.
+ * @return uint64_t Queue wait latency in nanoseconds, 0 if not available.
  */
-extern uint64_t bthread_queue_latency_us(void);
+extern uint64_t bthread_queue_latency_ns(void);
 
 /**
  * @brief Retrieves the context switch latency of the current bthread.
  *
- * This function returns the time (in microseconds) from when the bthread was
+ * This function returns the time (in nanoseconds) from when the bthread was
  * taken out of the runqueue to when it started executing.
  *
- * @return uint64_t Context switch latency in microseconds, 0 if not available.
+ * @return uint64_t Context switch latency in nanoseconds, 0 if not available.
  */
-extern uint64_t bthread_switch_latency_us(void);
+extern uint64_t bthread_switch_latency_ns(void);
 
 __END_DECLS
 

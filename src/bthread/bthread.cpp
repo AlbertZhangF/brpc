@@ -655,34 +655,34 @@ uint64_t bthread_cpu_clock_ns(void) {
     return 0;
 }
 
-uint64_t bthread_sched_latency_us(void) {
+uint64_t bthread_sched_latency_ns(void) {
     bthread::TaskGroup* g = bthread::tls_task_group;
     if (g != NULL && !g->is_current_main_task()) {
         bthread::TaskMeta* m = g->current_task();
-        if (m->start_exec_us > 0 && m->create_us > 0) {
-            return m->start_exec_us - m->create_us;
+        if (m->start_exec_ns > 0 && m->create_ns > 0) {
+            return m->start_exec_ns - m->create_ns;
         }
     }
     return 0;
 }
 
-uint64_t bthread_queue_latency_us(void) {
+uint64_t bthread_queue_latency_ns(void) {
     bthread::TaskGroup* g = bthread::tls_task_group;
     if (g != NULL && !g->is_current_main_task()) {
         bthread::TaskMeta* m = g->current_task();
-        if (m->dequeue_us > 0 && m->enqueue_us > 0) {
-            return m->dequeue_us - m->enqueue_us;
+        if (m->dequeue_ns > 0 && m->enqueue_ns > 0) {
+            return m->dequeue_ns - m->enqueue_ns;
         }
     }
     return 0;
 }
 
-uint64_t bthread_switch_latency_us(void) {
+uint64_t bthread_switch_latency_ns(void) {
     bthread::TaskGroup* g = bthread::tls_task_group;
     if (g != NULL && !g->is_current_main_task()) {
         bthread::TaskMeta* m = g->current_task();
-        if (m->start_exec_us > 0 && m->dequeue_us > 0) {
-            return m->start_exec_us - m->dequeue_us;
+        if (m->start_exec_ns > 0 && m->dequeue_ns > 0) {
+            return m->start_exec_ns - m->dequeue_ns;
         }
     }
     return 0;
