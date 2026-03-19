@@ -30,6 +30,13 @@
 #include "bvar/variable.h"
 #include "test.pb.h"
 
+// Declare new bthread scheduling latency interfaces
+extern "C" {
+uint64_t bthread_sched_latency_ns(void);
+uint64_t bthread_queue_latency_ns(void);
+uint64_t bthread_switch_latency_ns(void);
+}
+
 #ifdef BRPC_WITH_RDMA
 
 DEFINE_int32(thread_num, 0, "How many threads are used");
