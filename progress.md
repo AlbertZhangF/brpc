@@ -66,13 +66,14 @@
   - `progress.md`
 
 ### Phase 6: Compression Observability Extension
-- **Status:** in_progress
+- **Status:** complete
 - Actions taken:
   - Re-read planning files and inspected `src/brpc/channel.cpp`, `src/brpc/protocol.cpp`, and `src/brpc/policy/baidu_rpc_protocol.cpp` to locate the correct framework hook points.
   - Confirmed that protocol-layer serialize/deserialize paths, not `Channel`, are the right place to add directional compression logs and timing.
   - Added framework compression-stage helpers and exposed `bvar::LatencyRecorder` metrics in `src/brpc/compress.cpp`.
   - Instrumented `baidu_std` request/response serialize/deserialize paths with directional latency recording and optional INFO logs.
   - Extended `rdma_performance` responses and client summary output to surface Avg/P99 values for client/server compression stages.
+  - Created commit `2aeebc2` for the framework-level compression observability changes.
 - Files created/modified:
   - `task_plan.md`
   - `findings.md`
@@ -83,6 +84,15 @@
   - `example/rdma_performance/test.proto`
   - `example/rdma_performance/server.cpp`
   - `example/rdma_performance/client.cpp`
+
+### Phase 7: Final Delivery
+- **Status:** complete
+- Actions taken:
+  - Verified the repository is clean after the observability commit.
+  - Prepared final usage guidance including log flags and benchmark commands.
+- Files created/modified:
+  - `task_plan.md`
+  - `progress.md`
 
 ## Test Results
 | Test | Input | Expected | Actual | Status |
@@ -99,8 +109,8 @@
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 6 |
-| Where am I going? | Add framework observability for compression and then re-verify and re-commit |
+| Where am I? | Phase 7 |
+| Where am I going? | Work is complete; final handoff includes commands and caveats |
 | What's the goal? | Extend the rdma compression work with framework logs and latency metrics for compress/decompress stages |
 | What have I learned? | `Channel` only wires protocol callbacks; the protocol boundary is the correct place for directional compression observability |
-| What have I done? | Completed the first implementation/commit and started the observability extension design |
+| What have I done? | Added framework logs/metrics, exposed them in the example, and created the follow-up commit |

@@ -4,7 +4,7 @@
 Enable configurable request/response compression in `example/rdma_performance`, add framework-level logs and latency metrics proving compression/decompression paths are active, and finish with verification plus a git commit.
 
 ## Current Phase
-Phase 6
+Phase 7
 
 ## Phases
 ### Phase 1: Requirements & Discovery
@@ -38,11 +38,17 @@ Phase 6
 - **Status:** complete
 
 ### Phase 6: Compression Observability Extension
-- [ ] Add framework-level compression/decompression logs
-- [ ] Add framework latency metrics for compress/decompress stages
-- [ ] Expose and print the metrics from `example/rdma_performance`
-- [ ] Re-verify and create a new commit
-- **Status:** in_progress
+- [x] Add framework-level compression/decompression logs
+- [x] Add framework latency metrics for compress/decompress stages
+- [x] Expose and print the metrics from `example/rdma_performance`
+- [x] Re-verify and create a new commit
+- **Status:** complete
+
+### Phase 7: Final Delivery
+- [x] Review outputs and planning files
+- [x] Generate commit message and commit changes
+- [x] Deliver summary and usage notes to user
+- **Status:** complete
 
 ## Key Questions
 1. Which compression algorithms are already supported by brpc at framework level and under what build/runtime constraints?
