@@ -212,6 +212,9 @@ void RecordRpcCompressStage(RpcCompressStage stage,
                             size_t output_size);
 
 // Query the exposed latency recorder for a directional compression stage.
+int64_t GetRpcCompressStageLatency(RpcCompressStage stage);
+int64_t GetRpcCompressStageLatencyPercentile(RpcCompressStage stage,
+                                             double ratio);
 int64_t GetRpcCompressStageLatencyNs(RpcCompressStage stage);
 int64_t GetRpcCompressStageLatencyPercentileNs(RpcCompressStage stage,
                                                double ratio);

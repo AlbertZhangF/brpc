@@ -186,6 +186,10 @@ int64_t GetRpcCompressStageLatencyNs(RpcCompressStage stage) {
     return g_rpc_compress_latency[stage].latency(10);
 }
 
+int64_t GetRpcCompressStageLatency(RpcCompressStage stage) {
+    return GetRpcCompressStageLatencyNs(stage);
+}
+
 int64_t GetRpcCompressStageLatencyPercentileNs(RpcCompressStage stage,
                                                double ratio) {
     if (stage < RPC_COMPRESS_STAGE_CLIENT_REQUEST ||
@@ -193,6 +197,11 @@ int64_t GetRpcCompressStageLatencyPercentileNs(RpcCompressStage stage,
         return 0;
     }
     return g_rpc_compress_latency[stage].latency_percentile(ratio);
+}
+
+int64_t GetRpcCompressStageLatencyPercentile(RpcCompressStage stage,
+                                             double ratio) {
+    return GetRpcCompressStageLatencyPercentileNs(stage, ratio);
 }
 
 ::google::protobuf::Metadata Serializer::GetMetadata() const {

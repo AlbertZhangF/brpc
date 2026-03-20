@@ -362,14 +362,14 @@ void Test(int thread_num, int attachment_size) {
     uint64_t end_time = butil::gettimeofday_us();
     double throughput = g_total_bytes / 1.048576 / (end_time - start_time);
     const int64_t client_request_compress_avg_ns =
-        brpc::GetRpcCompressStageLatencyNs(brpc::RPC_COMPRESS_STAGE_CLIENT_REQUEST);
+        brpc::GetRpcCompressStageLatency(brpc::RPC_COMPRESS_STAGE_CLIENT_REQUEST);
     const int64_t client_request_compress_p99_ns =
-        brpc::GetRpcCompressStageLatencyPercentileNs(
+        brpc::GetRpcCompressStageLatencyPercentile(
             brpc::RPC_COMPRESS_STAGE_CLIENT_REQUEST, 0.99);
     const int64_t client_response_decompress_avg_ns =
-        brpc::GetRpcCompressStageLatencyNs(brpc::RPC_COMPRESS_STAGE_CLIENT_RESPONSE);
+        brpc::GetRpcCompressStageLatency(brpc::RPC_COMPRESS_STAGE_CLIENT_RESPONSE);
     const int64_t client_response_decompress_p99_ns =
-        brpc::GetRpcCompressStageLatencyPercentileNs(
+        brpc::GetRpcCompressStageLatencyPercentile(
             brpc::RPC_COMPRESS_STAGE_CLIENT_RESPONSE, 0.99);
     if (FLAGS_test_iterations == 0) {
         std::cout << "Avg-Latency: " << g_latency_recorder.latency(10)
