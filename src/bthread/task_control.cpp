@@ -443,9 +443,14 @@ int TaskControl::_destroy_group(TaskGroup* g) {
 }
 
 bool TaskControl::steal_task(bthread_t* tid, size_t* seed, size_t offset) {
+    uint64_t steal_start = butil::cpuwide_time_ns();
     auto tag = tls_task_group->tag();
 
     if (_priority_queues[tag].steal(tid)) {
+        extern bvar::Adder<uint64_t> g_steal_success_count;
+        extern bvar::LatencyRecorder g_steal_latency;
+        g_steal_success_count << 1;
+        g_steal_latency << (butil::cpuwide_time_ns() - steal_start);
         return true;
     }
 
@@ -475,6 +480,17 @@ bool TaskControl::steal_task(bthread_t* tid, size_t* seed, size_t offset) {
         }
     }
     *seed = s;
+
+    extern bvar::Adder<uint64_t> g_steal_success_count;
+    extern bvar::Adder<uint64_t> g_steal_fail_count;
+    extern bvar::LatencyRecorder g_steal_latency;
+    uint64_t steal_cost = butil::cpuwide_time_ns() - steal_start;
+    if (stolen) {
+        g_steal_success_count << 1;
+        g_steal_latency << steal_cost;
+    } else {
+        g_steal_fail_count << 1;
+    }
     return stolen;
 }
 

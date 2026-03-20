@@ -83,7 +83,14 @@ inline void TaskGroup::sched_to(TaskGroup** pg, bthread_t next_tid) {
 }
 
 inline void TaskGroup::push_rq(bthread_t tid) {
+    uint64_t retry_start = 0;
     while (!_rq.push(tid)) {
+        if (retry_start == 0) {
+            retry_start = butil::cpuwide_time_ns();
+        }
+        extern bvar::Adder<uint64_t> g_rq_full_retry_count;
+        g_rq_full_retry_count << 1;
+
         // Created too many bthreads: a promising approach is to insert the
         // task into another TaskGroup, but we don't use it because:
         // * There're already many bthreads to run, inserting the bthread
@@ -98,6 +105,10 @@ inline void TaskGroup::push_rq(bthread_t tid) {
         // make set_remained()-callbacks do context switches and need extensive
         // reviews on related code.
         ::usleep(1000);
+    }
+    if (retry_start > 0) {
+        extern bvar::LatencyRecorder g_rq_full_retry_latency;
+        g_rq_full_retry_latency << (butil::cpuwide_time_ns() - retry_start);
     }
 }
 

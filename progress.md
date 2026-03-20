@@ -39,6 +39,12 @@
    - 调整接口：将bthread_sched_latency_us等接口改为bthread_sched_latency_ns，返回ns单位
    - 调整client输出：统计时将ns转换为us存储，保持输出可读性
 6. 所有修改已完成，等待重新编译测试
+7. Phase 8细粒度调度打点实现：
+   - 添加队列满重试统计：统计push_rq时的重试次数和重试耗时
+   - 添加任务偷取统计：统计steal_task的成功/失败次数、偷取耗时
+   - 添加远程队列锁竞争统计：统计ready_to_run_remote中锁等待时间
+   - 新增5个bvar统计变量，支持全局查看细粒度指标
+   - 所有打点逻辑添加完成，可通过/vars接口查看或者在client中输出
 
 ### Test Results
 | Test | Expected | Actual | Status |

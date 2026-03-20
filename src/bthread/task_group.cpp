@@ -871,7 +871,11 @@ void TaskGroup::ready_to_run_remote(TaskMeta* meta, bool nosignal) {
     _control->_task_tracer.set_status(TASK_STATUS_READY, meta);
 #endif // BRPC_BTHREAD_TRACER
     meta->enqueue_ns = butil::cpuwide_time_ns(); // Record enqueue time
+    uint64_t lock_start = butil::cpuwide_time_ns();
     _remote_rq._mutex.lock();
+    // Record remote queue lock wait latency
+    extern bvar::LatencyRecorder g_remote_lock_wait_latency;
+    g_remote_lock_wait_latency << (butil::cpuwide_time_ns() - lock_start);
     while (!_remote_rq.push_locked(meta->tid)) {
         flush_nosignal_tasks_remote_locked(_remote_rq._mutex);
         LOG_EVERY_SECOND(ERROR) << "_remote_rq is full, capacity="

@@ -40,6 +40,14 @@ bvar::LatencyRecorder g_sched_latency("bthread_sched_latency");
 bvar::LatencyRecorder g_queue_latency("bthread_queue_latency");
 bvar::LatencyRecorder g_switch_latency("bthread_switch_latency");
 
+// Fine-grained scheduling statistics
+bvar::Adder<uint64_t> g_rq_full_retry_count("bthread_rq_full_retry_count");
+bvar::LatencyRecorder g_rq_full_retry_latency("bthread_rq_full_retry_latency");
+bvar::Adder<uint64_t> g_steal_success_count("bthread_steal_success_count");
+bvar::Adder<uint64_t> g_steal_fail_count("bthread_steal_fail_count");
+bvar::LatencyRecorder g_steal_latency("bthread_steal_latency");
+bvar::LatencyRecorder g_remote_lock_wait_latency("bthread_remote_lock_wait_latency");
+
 static bool validate_bthread_concurrency(const char*, int32_t val) {
     // bthread_setconcurrency sets the flag on success path which should
     // not be strictly in a validator. But it's OK for a int flag.

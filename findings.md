@@ -29,11 +29,11 @@
 ## Technical Decisions
 | Decision | Rationale |
 |----------|-----------|
-| 在TaskMeta中添加调度时间戳字段 | 新增uint64_t create_us、enqueue_us、dequeue_us、start_exec_us字段，记录bthread创建时间、入队时间、出队时间、开始执行时间，计算各阶段耗时 |
+| 在TaskMeta中添加调度时间戳字段 | 新增uint64_t create_ns、enqueue_ns、dequeue_ns、start_exec_ns字段，记录bthread创建时间、入队时间、出队时间、开始执行时间，计算各阶段耗时 |
 | 使用bvar::LatencyRecorder统计各阶段耗时 | 新增三个全局统计变量：g_sched_latency(总调度耗时)、g_queue_latency(队列等待耗时)、g_switch_latency(上下文切换耗时)，复用brpc现有统计组件，内置支持avg、p99等指标 |
-| 新增bthread调度统计接口 | 提供bthread_get_sched_stats()接口，返回统计结果的格式化字符串，方便上层应用获取 |
-| 在InputMessageBase中添加调度耗时字段 | 记录每个请求的调度总耗时，方便rdma_performance示例统计每个请求的调度时延 |
+| 新增bthread调度统计接口 | 提供bthread_sched_latency_ns()、bthread_queue_latency_ns()、bthread_switch_latency_ns()接口，返回各阶段调度耗时 |
 | 在rdma_performance客户端添加统计结果输出 | 扩展现有统计逻辑，收集每个请求的调度耗时，测试结束后与原有Avg-Latency、P99同步输出 |
+| 新增细粒度调度统计 | 添加队列满重试、任务偷取、远程队列锁竞争等统计，深入定位调度瓶颈 |
 
 ## Issues Encountered
 | Issue | Resolution |
