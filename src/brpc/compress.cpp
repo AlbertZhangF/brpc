@@ -150,7 +150,7 @@ const char* RpcCompressStageToCStr(RpcCompressStage stage) {
 
 void RecordRpcCompressStage(RpcCompressStage stage,
                             CompressType type,
-                            int64_t latency_us,
+                            int64_t latency_ns,
                             size_t input_size,
                             size_t output_size) {
     if (type == COMPRESS_TYPE_NONE ||
@@ -158,7 +158,7 @@ void RecordRpcCompressStage(RpcCompressStage stage,
         stage >= RPC_COMPRESS_STAGE_COUNT) {
         return;
     }
-    g_rpc_compress_latency[stage] << latency_us;
+    g_rpc_compress_latency[stage] << latency_ns;
     if (!FLAGS_log_rpc_compress_details) {
         return;
     }
@@ -170,7 +170,7 @@ void RecordRpcCompressStage(RpcCompressStage stage,
         g_rpc_compress_log_count[stage][type_index].fetch_add(1) + 1;
     if (seq <= 5 || seq % 1000 == 0) {
         LOG(INFO) << "RPC " << RpcCompressStageToCStr(stage)
-                  << " took " << latency_us << "us"
+                  << " took " << latency_ns << "ns"
                   << ", type=" << CompressTypeToCStr(type)
                   << ", input_size=" << input_size
                   << ", output_size=" << output_size
@@ -178,7 +178,7 @@ void RecordRpcCompressStage(RpcCompressStage stage,
     }
 }
 
-int64_t GetRpcCompressStageLatency(RpcCompressStage stage) {
+int64_t GetRpcCompressStageLatencyNs(RpcCompressStage stage) {
     if (stage < RPC_COMPRESS_STAGE_CLIENT_REQUEST ||
         stage >= RPC_COMPRESS_STAGE_COUNT) {
         return 0;
@@ -186,8 +186,8 @@ int64_t GetRpcCompressStageLatency(RpcCompressStage stage) {
     return g_rpc_compress_latency[stage].latency(10);
 }
 
-int64_t GetRpcCompressStageLatencyPercentile(RpcCompressStage stage,
-                                             double ratio) {
+int64_t GetRpcCompressStageLatencyPercentileNs(RpcCompressStage stage,
+                                               double ratio) {
     if (stage < RPC_COMPRESS_STAGE_CLIENT_REQUEST ||
         stage >= RPC_COMPRESS_STAGE_COUNT) {
         return 0;

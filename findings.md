@@ -36,6 +36,7 @@
 | Add compression timing at the baidu_std protocol boundary | That layer has enough context to label events as client request compress, server request decompress, server response compress, and client response decompress |
 | Use four framework-global `bvar::LatencyRecorder`s for compression stages | Keeps instrumentation aligned with brpc's usual exposed-variable model and makes the metrics readable from both framework code and example code |
 | Gate detailed compression logs behind a flag | Allows proof logs when needed without turning every compressed benchmark run into excessive INFO noise |
+| Store compression timings in nanoseconds end-to-end | Matches the user's requested unit and keeps framework timing, proto fields, and example output consistent |
 
 ## Issues Encountered
 | Issue | Resolution |

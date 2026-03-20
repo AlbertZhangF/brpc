@@ -149,7 +149,7 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
                          RpcCompressStage stage = RPC_COMPRESS_STAGE_COUNT) {
     auto serialize = [&](Serializer& serializer) -> bool {
         bool ok;
-        const int64_t start_us = butil::cpuwide_time_us();
+        const int64_t start_ns = butil::cpuwide_time_ns();
         if (COMPRESS_TYPE_NONE == compress_type) {
             butil::IOBufAsZeroCopyOutputStream stream(buf);
             ok = serializer.SerializeTo(&stream);
@@ -160,7 +160,7 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
             }
             ok = handler->Compress(serializer, buf);
         }
-        const int64_t end_us = butil::cpuwide_time_us();
+        const int64_t end_ns = butil::cpuwide_time_ns();
         if (ok && compress_type != COMPRESS_TYPE_NONE) {
             size_t input_size = 0;
             if (CONTENT_TYPE_PB == content_type) {
@@ -169,7 +169,7 @@ bool SerializeRpcMessage(const google::protobuf::Message& message,
                 input_size = buf->size();
             }
             RecordRpcCompressStage(stage, compress_type,
-                                   end_us - start_us, input_size, buf->size());
+                                   end_ns - start_ns, input_size, buf->size());
         }
         ChecksumIn checksum_in{buf, &cntl};
         ComputeDataChecksum(checksum_in, checksum_type);
@@ -517,7 +517,7 @@ bool DeserializeRpcMessage(const butil::IOBuf& data, Controller& cntl,
         if (!ok) {
             return ok;
         }
-        const int64_t start_us = butil::cpuwide_time_us();
+        const int64_t start_ns = butil::cpuwide_time_ns();
         if (COMPRESS_TYPE_NONE == compress_type) {
             butil::IOBufAsZeroCopyInputStream stream(data);
             ok = deserializer.DeserializeFrom(&stream);
@@ -528,7 +528,7 @@ bool DeserializeRpcMessage(const butil::IOBuf& data, Controller& cntl,
             }
             ok = handler->Decompress(data, &deserializer);
         }
-        const int64_t end_us = butil::cpuwide_time_us();
+        const int64_t end_ns = butil::cpuwide_time_ns();
         if (ok && compress_type != COMPRESS_TYPE_NONE) {
             size_t output_size = 0;
             if (CONTENT_TYPE_PB == content_type) {
@@ -537,7 +537,7 @@ bool DeserializeRpcMessage(const butil::IOBuf& data, Controller& cntl,
                 output_size = data.size();
             }
             RecordRpcCompressStage(stage, compress_type,
-                                   end_us - start_us, data.size(), output_size);
+                                   end_ns - start_ns, data.size(), output_size);
         }
         return ok;
     };

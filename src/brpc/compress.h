@@ -207,14 +207,14 @@ bool SerializeAsCompressedData(const google::protobuf::Message& msg,
 // Record latency and optional logs for a directional compression stage.
 void RecordRpcCompressStage(RpcCompressStage stage,
                             CompressType type,
-                            int64_t latency_us,
+                            int64_t latency_ns,
                             size_t input_size,
                             size_t output_size);
 
 // Query the exposed latency recorder for a directional compression stage.
-int64_t GetRpcCompressStageLatency(RpcCompressStage stage);
-int64_t GetRpcCompressStageLatencyPercentile(RpcCompressStage stage,
-                                             double ratio);
+int64_t GetRpcCompressStageLatencyNs(RpcCompressStage stage);
+int64_t GetRpcCompressStageLatencyPercentileNs(RpcCompressStage stage,
+                                               double ratio);
 const char* RpcCompressStageToCStr(RpcCompressStage stage);
 
 } // namespace brpc

@@ -90,9 +90,17 @@
 - Actions taken:
   - Verified the repository is clean after the observability commit.
   - Prepared final usage guidance including log flags and benchmark commands.
+  - Converted compression-stage timing from microseconds to nanoseconds across framework APIs, protocol timing, proto fields, and example output.
 - Files created/modified:
   - `task_plan.md`
   - `progress.md`
+  - `findings.md`
+  - `src/brpc/compress.h`
+  - `src/brpc/compress.cpp`
+  - `src/brpc/policy/baidu_rpc_protocol.cpp`
+  - `example/rdma_performance/test.proto`
+  - `example/rdma_performance/server.cpp`
+  - `example/rdma_performance/client.cpp`
 
 ## Test Results
 | Test | Input | Expected | Actual | Status |
