@@ -47,6 +47,8 @@ bvar::Adder<uint64_t> g_steal_success_count("bthread_steal_success_count");
 bvar::Adder<uint64_t> g_steal_fail_count("bthread_steal_fail_count");
 bvar::LatencyRecorder g_steal_latency("bthread_steal_latency");
 bvar::LatencyRecorder g_remote_lock_wait_latency("bthread_remote_lock_wait_latency");
+// Link level scheduling latency: from cut_in_msg done to ProcessRpcRequest start
+bvar::LatencyRecorder g_link_sched_latency("bthread_link_sched_latency");
 
 static bool validate_bthread_concurrency(const char*, int32_t val) {
     // bthread_setconcurrency sets the flag on success path which should
