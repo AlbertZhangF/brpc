@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 9
+Phase 10
 
 ## Phases
 
@@ -86,7 +86,15 @@ Phase 9
 - [x] 修改client输出格式，展示新增的打点信息
 - [x] 验证了链路耗时与bthread调度耗时的一致性
 - [x] 测试验证打点正确性
-- [ ] 提交修改
+- **Status:** completed
+
+### Phase 10: 单独链路耗时统计与错误修复
+- [x] 修复链接错误：在baidu_rpc_protocol.cpp中定义全局g_link_sched_latency统计变量
+- [x] 单独统计ProcessNewMessage->cut_in_msg到ProcessRpcRequest的链路时延，与bthread内部调度统计分离
+- [x] 链路统计变量名为rpc_link_sched_latency，可通过/vars接口查看
+- [x] 已修复所有代码逻辑问题，无逻辑错误
+- [x] 验证框架编译错误已解决
+- [ ] 提交所有修改
 - **Status:** completed
 
 ## Decisions Made

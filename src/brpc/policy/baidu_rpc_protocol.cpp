@@ -61,6 +61,9 @@ DEFINE_bool(baidu_std_protocol_deliver_timeout_ms, false,
 
 DECLARE_bool(pb_enum_as_number);
 
+// RPC link scheduling latency: from cut_in_msg done to ProcessRpcRequest start
+bvar::LatencyRecorder g_link_sched_latency("rpc_link_sched_latency");
+
 // Notes:
 // 1. 12-byte header [PRPC][body_size][meta_size]
 // 2. body_size and meta_size are in network byte order
@@ -568,8 +571,7 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
     uint64_t now_ns = butil::cpuwide_time_ns();
     uint64_t sched_latency_ns = now_ns - msg_base->cut_done_ns();
     // Add to separate link level statistics
-    extern bvar::LatencyRecorder g_link_sched_latency;
-    bthread::g_link_sched_latency << sched_latency_ns;
+    g_link_sched_latency << sched_latency_ns;
     DestroyingPtr<MostCommonMessage> msg(static_cast<MostCommonMessage*>(msg_base));
     SocketUniquePtr socket_guard(msg->ReleaseSocket());
     Socket* socket = socket_guard.get();
