@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 8
+Phase 9
 
 ## Phases
 
@@ -76,6 +76,17 @@ Phase 8
 - [x] 添加远程队列锁竞争统计：统计ready_to_run_remote中锁等待时间
 - [x] 新增对应的bvar统计变量，支持全局查看
 - [ ] 更新client输出，展示新增的细粒度统计指标（可选，根据需要添加）
+- **Status:** completed
+
+### Phase 9: 完善client输出与链路打点
+- [x] 在client输出中添加细粒度调度统计指标的打印
+- [x] 在InputMessageBase中添加_cut_done_ns字段，记录cut_in_msg完成时间
+- [x] 在ProcessNewMessage->cut_in_msg之后添加打点，设置_cut_done_ns
+- [x] 在ProcessRpcRequest开始处添加打点，计算cut_in_msg到ProcessRpcRequest的耗时
+- [x] 修改client输出格式，展示新增的打点信息
+- [x] 验证了链路耗时与bthread调度耗时的一致性
+- [x] 测试验证打点正确性
+- [ ] 提交修改
 - **Status:** completed
 
 ## Decisions Made

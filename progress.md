@@ -45,6 +45,12 @@
    - 添加远程队列锁竞争统计：统计ready_to_run_remote中锁等待时间
    - 新增5个bvar统计变量，支持全局查看细粒度指标
    - 所有打点逻辑添加完成，可通过/vars接口查看或者在client中输出
+8. Phase 9完善client输出与链路打点：
+   - 在client输出中添加细粒度调度统计信息的打印，包括队列满重试次数、偷取成功/失败次数、各阶段平均耗时
+   - 在InputMessageBase中添加_cut_done_ns字段，记录cut_in_msg完成时间
+   - 在ProcessNewMessage中cut_in_msg成功后设置_cut_done_ns时间戳
+   - 在ProcessRpcRequest开头计算cut_in_msg到ProcessRpcRequest的耗时，更新到全局统计
+   - 链路打点完成，验证了bthread调度耗时与这段链路耗时的一致性
 
 ### Test Results
 | Test | Expected | Actual | Status |

@@ -47,6 +47,7 @@ public:
     // [Internal]
     int64_t received_us() const { return _received_us; }
     int64_t base_real_us() const { return _base_real_us; }
+    uint64_t cut_done_ns() const { return _cut_done_ns; }
 
 protected:
     virtual ~InputMessageBase();
@@ -57,6 +58,7 @@ friend void* ProcessInputMessage(void*);
 friend class Stream;
     int64_t _received_us;
     int64_t _base_real_us;
+    uint64_t _cut_done_ns; // Time when cut_in_msg is done (ns)
     SocketUniquePtr _socket;
     void (*_process)(InputMessageBase* msg);
     const void* _arg;

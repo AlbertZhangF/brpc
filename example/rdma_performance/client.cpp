@@ -304,6 +304,18 @@ void Test(int thread_num, int attachment_size) {
             << "ns | Context Switch: Avg: " << g_bthread_switch_latency.latency(10)
             << "ns, P99: " << g_bthread_switch_latency.latency_percentile(0.99) << "ns"
             << std::endl;
+        // Print fine-grained scheduling statistics
+        uint64_t rq_retry_count = std::stoull(bvar::Variable::describe_exposed("bthread_rq_full_retry_count"));
+        uint64_t steal_success = std::stoull(bvar::Variable::describe_exposed("bthread_steal_success_count"));
+        uint64_t steal_fail = std::stoull(bvar::Variable::describe_exposed("bthread_steal_fail_count"));
+        double rq_retry_avg = std::stod(bvar::Variable::describe_exposed("bthread_rq_full_retry_latency_avg"));
+        double steal_avg = std::stod(bvar::Variable::describe_exposed("bthread_steal_latency_avg"));
+        double remote_lock_avg = std::stod(bvar::Variable::describe_exposed("bthread_remote_lock_wait_latency_avg"));
+        std::cout << "Fine-grained Sched: RQ Full Retries: " << rq_retry_count
+            << " (Avg: " << rq_retry_avg << "ns) | Steal Success: " << steal_success
+            << " | Steal Fail: " << steal_fail << " (Avg Steal: " << steal_avg
+            << "ns) | Remote Lock Avg: " << remote_lock_avg << "ns"
+            << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
     }
