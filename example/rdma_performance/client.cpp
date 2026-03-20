@@ -26,6 +26,7 @@
 #include "butil/fast_rand.h"
 #include "butil/logging.h"
 #include "brpc/compress.h"
+#include "brpc/global.h"
 #include "brpc/rdma/rdma_helper.h"
 #include "brpc/server.h"
 #include "brpc/channel.h"
@@ -403,6 +404,7 @@ void Test(int thread_num, int attachment_size) {
 
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+    brpc::GlobalInitializeOrDie();
 
     std::string error_text;
     if (!ParseCompressionType(FLAGS_request_compress_type,

@@ -24,6 +24,7 @@
 #include "butil/logging.h"
 #include "butil/time.h"
 #include "brpc/compress.h"
+#include "brpc/global.h"
 #include "brpc/server.h"
 #include "bvar/variable.h"
 #include "test.pb.h"
@@ -131,6 +132,7 @@ public:
 
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+    brpc::GlobalInitializeOrDie();
 
     std::string error_text;
     if (!ParseCompressionType(FLAGS_response_compress_type,
