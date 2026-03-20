@@ -17,6 +17,7 @@
 
 
 #include <atomic>
+#include <gflags/gflags.h>
 #include "butil/logging.h"
 #include "bvar/latency_recorder.h"
 #include "json2pb/json_to_pb.h"
