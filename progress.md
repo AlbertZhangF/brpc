@@ -56,18 +56,39 @@
   - `progress.md`
 
 ### Phase 5: Delivery
-- **Status:** in_progress
+- **Status:** complete
 - Actions taken:
   - Reviewed final change scope with `git diff --stat`.
   - Prepared commit message covering the rdma_performance compression enhancement.
+  - Created commit `9de6ebf` for the first round of compression support changes.
 - Files created/modified:
   - `task_plan.md`
   - `progress.md`
+
+### Phase 6: Compression Observability Extension
+- **Status:** in_progress
+- Actions taken:
+  - Re-read planning files and inspected `src/brpc/channel.cpp`, `src/brpc/protocol.cpp`, and `src/brpc/policy/baidu_rpc_protocol.cpp` to locate the correct framework hook points.
+  - Confirmed that protocol-layer serialize/deserialize paths, not `Channel`, are the right place to add directional compression logs and timing.
+  - Added framework compression-stage helpers and exposed `bvar::LatencyRecorder` metrics in `src/brpc/compress.cpp`.
+  - Instrumented `baidu_std` request/response serialize/deserialize paths with directional latency recording and optional INFO logs.
+  - Extended `rdma_performance` responses and client summary output to surface Avg/P99 values for client/server compression stages.
+- Files created/modified:
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+  - `src/brpc/compress.h`
+  - `src/brpc/compress.cpp`
+  - `src/brpc/policy/baidu_rpc_protocol.cpp`
+  - `example/rdma_performance/test.proto`
+  - `example/rdma_performance/server.cpp`
+  - `example/rdma_performance/client.cpp`
 
 ## Test Results
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
 | Example CMake configure | `cmake -S example/rdma_performance -B /tmp/rdma_performance_build` | Configure and generate build files | Failed: missing discoverable brpc output path and Protobuf in current environment | blocked |
+| Patch sanity | `git diff --check` | No whitespace or merge-marker issues | Passed | ok |
 
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |
@@ -78,8 +99,8 @@
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 5 |
-| Where am I going? | Commit the patch set and deliver the outcome plus follow-up suggestions |
-| What's the goal? | Enable configurable compression in `example/rdma_performance` and document brpc compression support |
-| What have I learned? | brpc compression is native for protobuf bodies, while attachments bypass that path in the relevant RPC protocols |
-| What have I done? | Planned the work, modified the example, and recorded the current environment's build-verification blocker |
+| Where am I? | Phase 6 |
+| Where am I going? | Add framework observability for compression and then re-verify and re-commit |
+| What's the goal? | Extend the rdma compression work with framework logs and latency metrics for compress/decompress stages |
+| What have I learned? | `Channel` only wires protocol callbacks; the protocol boundary is the correct place for directional compression observability |
+| What have I done? | Completed the first implementation/commit and started the observability extension design |

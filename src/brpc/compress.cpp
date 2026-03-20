@@ -16,13 +16,33 @@
 // under the License.
 
 
+#include <atomic>
 #include "butil/logging.h"
+#include "bvar/latency_recorder.h"
 #include "json2pb/json_to_pb.h"
 #include "brpc/compress.h"
 #include "brpc/protocol.h"
 #include "brpc/proto_base.pb.h"
 
 namespace brpc {
+
+DEFINE_bool(log_rpc_compress_details, false,
+            "Print INFO logs when RPC compression/decompression stages are exercised."
+            " Logs the first few requests and then every 1000th request per stage/type.");
+
+namespace {
+
+bvar::LatencyRecorder g_rpc_compress_latency[RPC_COMPRESS_STAGE_COUNT] = {
+    bvar::LatencyRecorder("rpc_client_request_compress"),
+    bvar::LatencyRecorder("rpc_server_request_decompress"),
+    bvar::LatencyRecorder("rpc_server_response_compress"),
+    bvar::LatencyRecorder("rpc_client_response_decompress"),
+};
+
+std::atomic<uint64_t> g_rpc_compress_log_count[RPC_COMPRESS_STAGE_COUNT]
+                                             [CompressType_MAX + 1];
+
+}  // namespace
 
 static const int MAX_HANDLER_SIZE = 1024;
 static CompressHandler s_handler_map[MAX_HANDLER_SIZE] = { { NULL, NULL, NULL } };
@@ -109,6 +129,69 @@ bool SerializeAsCompressedData(const google::protobuf::Message& msg,
         return msg.SerializeToZeroCopyStream(output);
     });
     return handler->Compress(serializer, buf);
+}
+
+const char* RpcCompressStageToCStr(RpcCompressStage stage) {
+    switch (stage) {
+    case RPC_COMPRESS_STAGE_CLIENT_REQUEST:
+        return "client_request_compress";
+    case RPC_COMPRESS_STAGE_SERVER_REQUEST:
+        return "server_request_decompress";
+    case RPC_COMPRESS_STAGE_SERVER_RESPONSE:
+        return "server_response_compress";
+    case RPC_COMPRESS_STAGE_CLIENT_RESPONSE:
+        return "client_response_decompress";
+    case RPC_COMPRESS_STAGE_COUNT:
+        break;
+    }
+    return "unknown";
+}
+
+void RecordRpcCompressStage(RpcCompressStage stage,
+                            CompressType type,
+                            int64_t latency_us,
+                            size_t input_size,
+                            size_t output_size) {
+    if (type == COMPRESS_TYPE_NONE ||
+        stage < RPC_COMPRESS_STAGE_CLIENT_REQUEST ||
+        stage >= RPC_COMPRESS_STAGE_COUNT) {
+        return;
+    }
+    g_rpc_compress_latency[stage] << latency_us;
+    if (!FLAGS_log_rpc_compress_details) {
+        return;
+    }
+    const int type_index = static_cast<int>(type);
+    if (type_index < 0 || type_index > CompressType_MAX) {
+        return;
+    }
+    const uint64_t seq =
+        g_rpc_compress_log_count[stage][type_index].fetch_add(1) + 1;
+    if (seq <= 5 || seq % 1000 == 0) {
+        LOG(INFO) << "RPC " << RpcCompressStageToCStr(stage)
+                  << " took " << latency_us << "us"
+                  << ", type=" << CompressTypeToCStr(type)
+                  << ", input_size=" << input_size
+                  << ", output_size=" << output_size
+                  << ", seq=" << seq;
+    }
+}
+
+int64_t GetRpcCompressStageLatency(RpcCompressStage stage) {
+    if (stage < RPC_COMPRESS_STAGE_CLIENT_REQUEST ||
+        stage >= RPC_COMPRESS_STAGE_COUNT) {
+        return 0;
+    }
+    return g_rpc_compress_latency[stage].latency(10);
+}
+
+int64_t GetRpcCompressStageLatencyPercentile(RpcCompressStage stage,
+                                             double ratio) {
+    if (stage < RPC_COMPRESS_STAGE_CLIENT_REQUEST ||
+        stage >= RPC_COMPRESS_STAGE_COUNT) {
+        return 0;
+    }
+    return g_rpc_compress_latency[stage].latency_percentile(ratio);
 }
 
 ::google::protobuf::Metadata Serializer::GetMetadata() const {

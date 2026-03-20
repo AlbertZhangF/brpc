@@ -171,6 +171,14 @@ struct CompressHandler {
     const char* name;
 };
 
+enum RpcCompressStage {
+    RPC_COMPRESS_STAGE_CLIENT_REQUEST = 0,
+    RPC_COMPRESS_STAGE_SERVER_REQUEST = 1,
+    RPC_COMPRESS_STAGE_SERVER_RESPONSE = 2,
+    RPC_COMPRESS_STAGE_CLIENT_RESPONSE = 3,
+    RPC_COMPRESS_STAGE_COUNT = 4
+};
+
 // [NOT thread-safe] Register `handler' using key=`type'
 // Returns 0 on success, -1 otherwise
 int RegisterCompressHandler(CompressType type, CompressHandler handler);
@@ -195,6 +203,19 @@ bool ParseFromCompressedData(const butil::IOBuf& data,
 bool SerializeAsCompressedData(const google::protobuf::Message& msg,
                                butil::IOBuf* buf,
                                CompressType compress_type);
+
+// Record latency and optional logs for a directional compression stage.
+void RecordRpcCompressStage(RpcCompressStage stage,
+                            CompressType type,
+                            int64_t latency_us,
+                            size_t input_size,
+                            size_t output_size);
+
+// Query the exposed latency recorder for a directional compression stage.
+int64_t GetRpcCompressStageLatency(RpcCompressStage stage);
+int64_t GetRpcCompressStageLatencyPercentile(RpcCompressStage stage,
+                                             double ratio);
+const char* RpcCompressStageToCStr(RpcCompressStage stage);
 
 } // namespace brpc
 

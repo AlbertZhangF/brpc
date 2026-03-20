@@ -109,6 +109,16 @@ public:
         } else {
             response->set_cpu_usage("");
         }
+        response->set_server_request_decompress_avg_us(
+            brpc::GetRpcCompressStageLatency(brpc::RPC_COMPRESS_STAGE_SERVER_REQUEST));
+        response->set_server_request_decompress_p99_us(
+            brpc::GetRpcCompressStageLatencyPercentile(
+                brpc::RPC_COMPRESS_STAGE_SERVER_REQUEST, 0.99));
+        response->set_server_response_compress_avg_us(
+            brpc::GetRpcCompressStageLatency(brpc::RPC_COMPRESS_STAGE_SERVER_RESPONSE));
+        response->set_server_response_compress_p99_us(
+            brpc::GetRpcCompressStageLatencyPercentile(
+                brpc::RPC_COMPRESS_STAGE_SERVER_RESPONSE, 0.99));
         if (request->echo_attachment() && !request->payload().empty()) {
             response->set_payload(request->payload());
         }

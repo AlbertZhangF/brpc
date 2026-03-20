@@ -61,6 +61,10 @@ bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
+butil::atomic<int64_t> g_server_request_decompress_avg_us;
+butil::atomic<int64_t> g_server_request_decompress_p99_us;
+butil::atomic<int64_t> g_server_response_compress_avg_us;
+butil::atomic<int64_t> g_server_response_compress_p99_us;
 std::vector<std::string> g_servers;
 int rr_index = 0;
 volatile bool g_stop = false;
@@ -249,6 +253,18 @@ public:
         if (closure->resp->cpu_usage().size() > 0) {
             g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
         }
+        g_server_request_decompress_avg_us.store(
+            closure->resp->server_request_decompress_avg_us(),
+            butil::memory_order_relaxed);
+        g_server_request_decompress_p99_us.store(
+            closure->resp->server_request_decompress_p99_us(),
+            butil::memory_order_relaxed);
+        g_server_response_compress_avg_us.store(
+            closure->resp->server_response_compress_avg_us(),
+            butil::memory_order_relaxed);
+        g_server_response_compress_p99_us.store(
+            closure->resp->server_response_compress_p99_us(),
+            butil::memory_order_relaxed);
         g_total_bytes.fetch_add(closure->test->_payload_size, butil::memory_order_relaxed);
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
 
@@ -315,6 +331,10 @@ void Test(int thread_num, int attachment_size) {
         << std::endl;
     g_total_bytes.store(0, butil::memory_order_relaxed);
     g_total_cnt.store(0, butil::memory_order_relaxed);
+    g_server_request_decompress_avg_us.store(0, butil::memory_order_relaxed);
+    g_server_request_decompress_p99_us.store(0, butil::memory_order_relaxed);
+    g_server_response_compress_avg_us.store(0, butil::memory_order_relaxed);
+    g_server_response_compress_p99_us.store(0, butil::memory_order_relaxed);
     std::vector<PerformanceTest*> tests;
     for (int k = 0; k < thread_num; ++k) {
         PerformanceTest* t = new PerformanceTest(attachment_size, FLAGS_echo_attachment);
@@ -340,6 +360,16 @@ void Test(int thread_num, int attachment_size) {
     }
     uint64_t end_time = butil::gettimeofday_us();
     double throughput = g_total_bytes / 1.048576 / (end_time - start_time);
+    const int64_t client_request_compress_avg_us =
+        brpc::GetRpcCompressStageLatency(brpc::RPC_COMPRESS_STAGE_CLIENT_REQUEST);
+    const int64_t client_request_compress_p99_us =
+        brpc::GetRpcCompressStageLatencyPercentile(
+            brpc::RPC_COMPRESS_STAGE_CLIENT_REQUEST, 0.99);
+    const int64_t client_response_decompress_avg_us =
+        brpc::GetRpcCompressStageLatency(brpc::RPC_COMPRESS_STAGE_CLIENT_RESPONSE);
+    const int64_t client_response_decompress_p99_us =
+        brpc::GetRpcCompressStageLatencyPercentile(
+            brpc::RPC_COMPRESS_STAGE_CLIENT_RESPONSE, 0.99);
     if (FLAGS_test_iterations == 0) {
         std::cout << "Avg-Latency: " << g_latency_recorder.latency(10)
             << ", 90th-Latency: " << g_latency_recorder.latency_percentile(0.9)
@@ -349,6 +379,18 @@ void Test(int thread_num, int attachment_size) {
             << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 / (end_time - start_time)) << "k"
             << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "\%"
             << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "\%"
+            << ", ClientRequestCompressAvg: " << client_request_compress_avg_us << "us"
+            << ", ClientRequestCompressP99: " << client_request_compress_p99_us << "us"
+            << ", ServerRequestDecompressAvg: "
+            << g_server_request_decompress_avg_us.load(butil::memory_order_relaxed) << "us"
+            << ", ServerRequestDecompressP99: "
+            << g_server_request_decompress_p99_us.load(butil::memory_order_relaxed) << "us"
+            << ", ServerResponseCompressAvg: "
+            << g_server_response_compress_avg_us.load(butil::memory_order_relaxed) << "us"
+            << ", ServerResponseCompressP99: "
+            << g_server_response_compress_p99_us.load(butil::memory_order_relaxed) << "us"
+            << ", ClientResponseDecompressAvg: " << client_response_decompress_avg_us << "us"
+            << ", ClientResponseDecompressP99: " << client_response_decompress_p99_us << "us"
             << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;

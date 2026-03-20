@@ -28,6 +28,10 @@ message PerfTestRequest {
 message PerfTestResponse {
       required string cpu_usage = 1;
       optional bytes payload = 2;
+      optional int64 server_request_decompress_avg_us = 3;
+      optional int64 server_request_decompress_p99_us = 4;
+      optional int64 server_response_compress_avg_us = 5;
+      optional int64 server_response_compress_p99_us = 6;
 };
 
 service PerfTestService {
