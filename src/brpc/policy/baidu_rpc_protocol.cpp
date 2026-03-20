@@ -567,9 +567,9 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
     // Calculate scheduling latency from cut_in_msg to ProcessRpcRequest
     uint64_t now_ns = butil::cpuwide_time_ns();
     uint64_t sched_latency_ns = now_ns - msg_base->cut_done_ns();
-    // Add to global statistics
+    // Add to global statistics (g_sched_latency is in bthread namespace)
     extern bvar::LatencyRecorder g_sched_latency;
-    g_sched_latency << sched_latency_ns;
+    bthread::g_sched_latency << sched_latency_ns;
     DestroyingPtr<MostCommonMessage> msg(static_cast<MostCommonMessage*>(msg_base));
     SocketUniquePtr socket_guard(msg->ReleaseSocket());
     Socket* socket = socket_guard.get();
