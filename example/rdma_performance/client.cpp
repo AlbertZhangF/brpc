@@ -17,11 +17,15 @@
 
 #include <stdlib.h>
 #include <unistd.h>
+#include <algorithm>
+#include <cctype>
+#include <string>
 #include <vector>
 #include <gflags/gflags.h>
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
 #include "butil/logging.h"
+#include "brpc/compress.h"
 #include "brpc/rdma/rdma_helper.h"
 #include "brpc/server.h"
 #include "brpc/channel.h"
@@ -46,6 +50,10 @@ DEFINE_int32(rpc_timeout_ms, 2000, "RPC call timeout");
 DEFINE_int32(test_seconds, 20, "Test running time");
 DEFINE_int32(test_iterations, 0, "Test iterations");
 DEFINE_int32(dummy_port, 8001, "Dummy server port number");
+DEFINE_string(request_compress_type, "none",
+              "Compression algorithm for request protobuf body: none/snappy/gzip/zlib");
+DEFINE_string(payload_mode, "message",
+              "Where benchmark payload is carried: message or attachment");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -56,8 +64,77 @@ butil::atomic<uint64_t> g_total_cnt;
 std::vector<std::string> g_servers;
 int rr_index = 0;
 volatile bool g_stop = false;
+brpc::CompressType g_request_compress_type = brpc::COMPRESS_TYPE_NONE;
 
 butil::atomic<int64_t> g_token(10000);
+
+enum PayloadMode {
+    PAYLOAD_MODE_MESSAGE = 0,
+    PAYLOAD_MODE_ATTACHMENT = 1,
+};
+
+PayloadMode g_payload_mode = PAYLOAD_MODE_MESSAGE;
+
+std::string ToLower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string JoinSupportedCompressionNames() {
+    std::vector<brpc::CompressHandler> handlers;
+    brpc::ListCompressHandler(&handlers);
+    std::string names = "none";
+    for (size_t i = 0; i < handlers.size(); ++i) {
+        names.append("/");
+        names.append(handlers[i].name);
+    }
+    return names;
+}
+
+bool ParseCompressionType(const std::string& name,
+                          brpc::CompressType* type,
+                          std::string* error) {
+    const std::string normalized = ToLower(name);
+    if (normalized == "none") {
+        *type = brpc::COMPRESS_TYPE_NONE;
+        return true;
+    }
+    if (normalized == "snappy") {
+        *type = brpc::COMPRESS_TYPE_SNAPPY;
+    } else if (normalized == "gzip") {
+        *type = brpc::COMPRESS_TYPE_GZIP;
+    } else if (normalized == "zlib") {
+        *type = brpc::COMPRESS_TYPE_ZLIB;
+    } else if (normalized == "lz4") {
+        *type = brpc::COMPRESS_TYPE_LZ4;
+    } else {
+        *error = "Unknown compression type `" + name + "`, supported values: "
+               + JoinSupportedCompressionNames();
+        return false;
+    }
+    if (brpc::FindCompressHandler(*type) == NULL) {
+        *error = "Compression type `" + normalized + "` is defined but not registered "
+               "in this brpc build, supported values: " + JoinSupportedCompressionNames();
+        return false;
+    }
+    return true;
+}
+
+bool ParsePayloadMode(const std::string& mode, PayloadMode* payload_mode) {
+    const std::string normalized = ToLower(mode);
+    if (normalized == "message") {
+        *payload_mode = PAYLOAD_MODE_MESSAGE;
+        return true;
+    }
+    if (normalized == "attachment") {
+        *payload_mode = PAYLOAD_MODE_ATTACHMENT;
+        return true;
+    }
+    LOG(ERROR) << "Unknown payload_mode=`" << mode
+               << "`, supported values: message/attachment";
+    return false;
+}
 
 static void* GenerateToken(void* arg) {
     int64_t start_time = butil::monotonic_time_ns();
@@ -77,24 +154,21 @@ static void* GenerateToken(void* arg) {
 class PerformanceTest {
 public:
     PerformanceTest(int attachment_size, bool echo_attachment)
-        : _addr(NULL)
-        , _channel(NULL)
+        : _channel(NULL)
         , _start_time(0)
         , _iterations(0)
         , _stop(false)
+        , _payload_size(attachment_size > 0 ? attachment_size : 0)
     {
         if (attachment_size > 0) {
-            _addr = malloc(attachment_size);
-            butil::fast_rand_bytes(_addr, attachment_size);
-            _attachment.append(_addr, attachment_size);
+            _payload.resize(attachment_size);
+            butil::fast_rand_bytes(&_payload[0], attachment_size);
+            _attachment.append(_payload);
         }
         _echo_attachment = echo_attachment;
     }
 
     ~PerformanceTest() {
-        if (_addr) {
-            free(_addr);
-        }
         delete _channel;
     }
 
@@ -116,7 +190,13 @@ public:
         brpc::Controller cntl;
         test::PerfTestResponse response;
         test::PerfTestRequest request;
+        cntl.set_request_compress_type(g_request_compress_type);
         request.set_echo_attachment(_echo_attachment);
+        if (g_payload_mode == PAYLOAD_MODE_MESSAGE) {
+            request.set_payload(_payload);
+        } else {
+            cntl.request_attachment().append(_attachment);
+        }
         test::PerfTestService_Stub stub(_channel);
         stub.Test(&cntl, &request, &response, NULL);
         if (cntl.Failed()) {
@@ -143,8 +223,13 @@ public:
         test::PerfTestRequest request;
         closure->resp = new test::PerfTestResponse();
         closure->cntl = new brpc::Controller();
+        closure->cntl->set_request_compress_type(g_request_compress_type);
         request.set_echo_attachment(_echo_attachment);
-        closure->cntl->request_attachment().append(_attachment);
+        if (g_payload_mode == PAYLOAD_MODE_MESSAGE) {
+            request.set_payload(_payload);
+        } else {
+            closure->cntl->request_attachment().append(_attachment);
+        }
         closure->test = this;
         google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
         test::PerfTestService_Stub stub(_channel);
@@ -164,7 +249,7 @@ public:
         if (closure->resp->cpu_usage().size() > 0) {
             g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
         }
-        g_total_bytes.fetch_add(closure->cntl->request_attachment().size(), butil::memory_order_relaxed);
+        g_total_bytes.fetch_add(closure->test->_payload_size, butil::memory_order_relaxed);
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
 
         cntl_guard.reset(NULL);
@@ -203,13 +288,14 @@ public:
     }
 
 private:
-    void* _addr;
     brpc::Channel* _channel;
     uint64_t _start_time;
     uint32_t _iterations;
     volatile bool _stop;
+    std::string _payload;
     butil::IOBuf _attachment;
     bool _echo_attachment;
+    size_t _payload_size;
 };
 
 static void* DeleteTest(void* arg) {
@@ -223,6 +309,8 @@ void Test(int thread_num, int attachment_size) {
         << ", Depth: " << FLAGS_queue_depth
         << ", Attachment: " << attachment_size << "B"
         << ", RDMA: " << (FLAGS_use_rdma ? "yes" : "no")
+        << ", PayloadMode: " << (g_payload_mode == PAYLOAD_MODE_MESSAGE ? "message" : "attachment")
+        << ", RequestCompress: " << brpc::CompressTypeToCStr(g_request_compress_type)
         << ", Echo: " << (FLAGS_echo_attachment ? "yes]" : "no]")
         << std::endl;
     g_total_bytes.store(0, butil::memory_order_relaxed);
@@ -273,6 +361,23 @@ void Test(int thread_num, int attachment_size) {
 
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+
+    std::string error_text;
+    if (!ParseCompressionType(FLAGS_request_compress_type,
+                              &g_request_compress_type, &error_text)) {
+        LOG(ERROR) << error_text;
+        return -1;
+    }
+    if (!ParsePayloadMode(FLAGS_payload_mode, &g_payload_mode)) {
+        return -1;
+    }
+    if (g_request_compress_type != brpc::COMPRESS_TYPE_NONE &&
+        g_payload_mode == PAYLOAD_MODE_ATTACHMENT) {
+        LOG(ERROR) << "payload_mode=attachment does not exercise brpc RPC compression, "
+                   << "because attachments are appended outside the compressed protobuf body. "
+                   << "Use --payload_mode=message when request_compress_type is not none.";
+        return -1;
+    }
 
     // Initialize RDMA environment in advance.
     if (FLAGS_use_rdma) {

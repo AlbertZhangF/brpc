@@ -15,11 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-
+#include <algorithm>
+#include <cctype>
+#include <string>
+#include <vector>
 #include <gflags/gflags.h>
 #include "butil/atomicops.h"
 #include "butil/logging.h"
 #include "butil/time.h"
+#include "brpc/compress.h"
 #include "brpc/server.h"
 #include "bvar/variable.h"
 #include "test.pb.h"
@@ -28,8 +32,57 @@
 
 DEFINE_int32(port, 8002, "TCP Port of this server");
 DEFINE_bool(use_rdma, true, "Use RDMA or not");
+DEFINE_string(response_compress_type, "none",
+              "Compression algorithm for response protobuf body: none/snappy/gzip/zlib");
 
 butil::atomic<uint64_t> g_last_time(0);
+brpc::CompressType g_response_compress_type = brpc::COMPRESS_TYPE_NONE;
+
+std::string ToLower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string JoinSupportedCompressionNames() {
+    std::vector<brpc::CompressHandler> handlers;
+    brpc::ListCompressHandler(&handlers);
+    std::string names = "none";
+    for (size_t i = 0; i < handlers.size(); ++i) {
+        names.append("/");
+        names.append(handlers[i].name);
+    }
+    return names;
+}
+
+bool ParseCompressionType(const std::string& name,
+                          brpc::CompressType* type,
+                          std::string* error) {
+    const std::string normalized = ToLower(name);
+    if (normalized == "none") {
+        *type = brpc::COMPRESS_TYPE_NONE;
+        return true;
+    }
+    if (normalized == "snappy") {
+        *type = brpc::COMPRESS_TYPE_SNAPPY;
+    } else if (normalized == "gzip") {
+        *type = brpc::COMPRESS_TYPE_GZIP;
+    } else if (normalized == "zlib") {
+        *type = brpc::COMPRESS_TYPE_ZLIB;
+    } else if (normalized == "lz4") {
+        *type = brpc::COMPRESS_TYPE_LZ4;
+    } else {
+        *error = "Unknown compression type `" + name + "`, supported values: "
+               + JoinSupportedCompressionNames();
+        return false;
+    }
+    if (brpc::FindCompressHandler(*type) == NULL) {
+        *error = "Compression type `" + normalized + "` is defined but not registered "
+               "in this brpc build, supported values: " + JoinSupportedCompressionNames();
+        return false;
+    }
+    return true;
+}
 
 namespace test {
 class PerfTestServiceImpl : public PerfTestService {
@@ -42,6 +95,9 @@ public:
               PerfTestResponse* response,
               google::protobuf::Closure* done) {
         brpc::ClosureGuard done_guard(done);
+        brpc::Controller* cntl =
+            static_cast<brpc::Controller*>(cntl_base);
+        cntl->set_response_compress_type(g_response_compress_type);
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         uint64_t now = butil::monotonic_time_us();
         if (now > last && now - last > 100000) {
@@ -53,9 +109,10 @@ public:
         } else {
             response->set_cpu_usage("");
         }
+        if (request->echo_attachment() && !request->payload().empty()) {
+            response->set_payload(request->payload());
+        }
         if (request->echo_attachment()) {
-            brpc::Controller* cntl =
-                static_cast<brpc::Controller*>(cntl_base);
             cntl->response_attachment().append(cntl->request_attachment());
         }
     }
@@ -64,6 +121,13 @@ public:
 
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+
+    std::string error_text;
+    if (!ParseCompressionType(FLAGS_response_compress_type,
+                              &g_response_compress_type, &error_text)) {
+        LOG(ERROR) << error_text;
+        return -1;
+    }
 
     brpc::Server server;
     test::PerfTestServiceImpl perf_test_service_impl;
