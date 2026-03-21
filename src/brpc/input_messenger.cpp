@@ -298,11 +298,11 @@ int InputMessenger::ProcessNewMessage(
         }
         pr.message()->_received_us = received_us;
         pr.message()->_base_real_us = base_realtime;
-        pr.message()->_cut_done_ns = butil::cpuwide_time_ns(); // Record cut_in_msg done time
-                    
+
         // This unique_ptr prevents msg to be lost before transfering
         // ownership to last_msg
         DestroyingPtr<InputMessageBase> msg(pr.message());
+        msg->_cut_done_ns = butil::cpuwide_time_ns(); // Record cut_in_msg done time (start of scheduling)
         QueueMessage(last_msg.release(), &num_bthread_created, m->_keytable_pool);
         if (_handlers[index].process == NULL) {
             LOG(ERROR) << "process of index=" << index << " is NULL";

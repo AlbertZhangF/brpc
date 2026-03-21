@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 13
+Phase 14
 
 ## Phases
 
@@ -122,6 +122,18 @@ Phase 13
 - [x] 调用superpowers:requesting-code-review进行代码审查
 - [x] 提交修改
 - **Status:** completed
+
+### Phase 14: 调整打点位置到用户指定位置
+- [ ] 在InputMessageBase中新增enqueue_time_ns字段，记录消息入队时间
+- [ ] 在src/brpc/input_messenger.cpp中DestroyingPtr msg(pr.message())一行后添加打点，设置msg->_enqueue_time_ns
+- [ ] 在src/brpc/policy/baidu_rpc_protocol.cpp:ProcessRpcRequest方法第一行添加打点，计算enqueue到开始处理的耗时
+- [ ] 将耗时统计到全局的rpc_link_sched_latency中
+- [ ] 删除之前多余的bthread内部打点（保留bthread调度统计功能）
+- [ ] 修复Link Sched Latency为0的问题
+- [ ] 测试验证修改效果
+- [ ] 调用superpowers:requesting-code-review进行代码审查
+- [ ] 提交修改
+- **Status:** in_progress
 
 ## Decisions Made
 | Decision | Rationale |
