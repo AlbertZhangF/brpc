@@ -42,6 +42,7 @@
 | 时间精度不足 | 原使用us单位，改为ns单位，提高统计精度 |
 | bvar重复暴露错误 | client中定义的LatencyRecorder名称自动加后缀后与bthread内部暴露的bvar变量重名，将client侧的统计变量重命名为client_前缀 |
 | std::invalid_argument stod异常 | 当bvar变量不存在时describe_exposed返回空字符串，添加空字符串判断，空值时使用默认值0 |
+| 细粒度时延打点均为0 | LatencyRecorder暴露的变量名会自动添加_latency后缀，之前获取变量名时缺少该后缀，修正变量名加上_latency后缀即可正确获取统计值 |
 
 ## Resources
 - [bthread文档](docs/cn/bthread.md)

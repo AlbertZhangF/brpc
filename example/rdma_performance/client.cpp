@@ -315,19 +315,20 @@ void Test(int thread_num, int attachment_size) {
         std::string steal_fail_str = bvar::Variable::describe_exposed("bthread_steal_fail_count");
         uint64_t steal_fail = steal_fail_str.empty() ? 0 : std::stoull(steal_fail_str);
 
-        std::string rq_retry_avg_str = bvar::Variable::describe_exposed("bthread_rq_full_retry_latency_avg");
+        // LatencyRecorder会自动添加_latency后缀，完整变量名是前缀 + _latency + _avg/_p99
+        std::string rq_retry_avg_str = bvar::Variable::describe_exposed("bthread_rq_full_retry_latency_latency_avg");
         double rq_retry_avg = rq_retry_avg_str.empty() ? 0.0 : std::stod(rq_retry_avg_str);
 
-        std::string steal_avg_str = bvar::Variable::describe_exposed("bthread_steal_latency_avg");
+        std::string steal_avg_str = bvar::Variable::describe_exposed("bthread_steal_latency_latency_avg");
         double steal_avg = steal_avg_str.empty() ? 0.0 : std::stod(steal_avg_str);
 
-        std::string remote_lock_avg_str = bvar::Variable::describe_exposed("bthread_remote_lock_wait_latency_avg");
+        std::string remote_lock_avg_str = bvar::Variable::describe_exposed("bthread_remote_lock_wait_latency_latency_avg");
         double remote_lock_avg = remote_lock_avg_str.empty() ? 0.0 : std::stod(remote_lock_avg_str);
 
-        std::string link_sched_avg_str = bvar::Variable::describe_exposed("bthread_link_sched_latency_avg");
+        std::string link_sched_avg_str = bvar::Variable::describe_exposed("bthread_link_sched_latency_latency_avg");
         double link_sched_avg = link_sched_avg_str.empty() ? 0.0 : std::stod(link_sched_avg_str);
 
-        std::string link_sched_p99_str = bvar::Variable::describe_exposed("bthread_link_sched_latency_p99");
+        std::string link_sched_p99_str = bvar::Variable::describe_exposed("bthread_link_sched_latency_latency_p99");
         int64_t link_sched_p99 = link_sched_p99_str.empty() ? 0 : std::stoll(link_sched_p99_str);
         std::cout << "Fine-grained Sched: RQ Full Retries: " << rq_retry_count
             << " (Avg: " << rq_retry_avg << "ns) | Steal Success: " << steal_success
