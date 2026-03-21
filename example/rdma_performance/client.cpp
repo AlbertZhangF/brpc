@@ -325,10 +325,10 @@ void Test(int thread_num, int attachment_size) {
         std::string remote_lock_avg_str = bvar::Variable::describe_exposed("bthread_remote_lock_wait_latency_latency_avg");
         double remote_lock_avg = remote_lock_avg_str.empty() ? 0.0 : std::stod(remote_lock_avg_str);
 
-        std::string link_sched_avg_str = bvar::Variable::describe_exposed("bthread_link_sched_latency_latency_avg");
+        std::string link_sched_avg_str = bvar::Variable::describe_exposed("rpc_link_sched_latency_latency_avg");
         double link_sched_avg = link_sched_avg_str.empty() ? 0.0 : std::stod(link_sched_avg_str);
 
-        std::string link_sched_p99_str = bvar::Variable::describe_exposed("bthread_link_sched_latency_latency_p99");
+        std::string link_sched_p99_str = bvar::Variable::describe_exposed("rpc_link_sched_latency_latency_p99");
         int64_t link_sched_p99 = link_sched_p99_str.empty() ? 0 : std::stoll(link_sched_p99_str);
         std::cout << "Fine-grained Sched: RQ Full Retries: " << rq_retry_count
             << " (Avg: " << rq_retry_avg << "ns) | Steal Success: " << steal_success

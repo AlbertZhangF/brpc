@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 12
+Phase 13
 
 ## Phases
 
@@ -111,6 +111,16 @@ Phase 12
 - [x] 测试验证修复效果
 - [x] 调用superpowers:requesting-code-review进行代码审查
 - [x] 生成commit信息并执行git commit
+- **Status:** completed
+
+### Phase 13: 解决统计为0和重复暴露问题
+- [x] 根因分析：Link Sched Latency和细粒度统计为0是因为这些是服务端进程的统计数据，client进程无法直接访问，client端的统计变量未被填充任何数据
+- [x] 根因分析：重复暴露问题是因为bvar变量在多个编译单元中定义，导致重复注册
+- [x] 优化：修复命名一致性问题，client端获取link_sched_latency的变量名与服务端统一为rpc_link_sched_latency
+- [x] 所有代码审查问题已修复
+- [x] 测试验证修复效果
+- [x] 调用superpowers:requesting-code-review进行代码审查
+- [x] 提交修改
 - **Status:** completed
 
 ## Decisions Made
