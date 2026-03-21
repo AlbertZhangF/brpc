@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 15
+Phase 16
 
 ## Phases
 
@@ -140,9 +140,22 @@ Phase 15
 - [x] 在client的HandleResponse中获取response中的sched_latency_ns字段并统计
 - [x] 修改client输出，直接使用统计变量打印，不再通过bvar获取客户端进程的空统计
 - [x] 测试验证，确保Link Sched Latency不再为0
+- [x] 代码审查通过
+- [x] 提交修改
+- **Status:** completed
+
+### Phase 16: 优化统计输出与链路耗时分析
+- [x] 根因分析：RQ Full Retries、Avg Steal、Remote Lock Avg为0的原因：
+  - RQ Full Retries：测试场景下运行队列没有满，没有触发重试
+  - Avg Steal：偷取任务操作非常快，耗时小于时间精度，或者统计逻辑有问题
+  - Remote Lock Avg：测试场景下没有跨worker提交任务，没有触发远程队列锁
+- [ ] 优化输出：删除为0的统计项，或者添加条件判断仅非0时显示
+- [ ] 分析Link Sched Latency的耗时构成，对比总调度耗时和链路耗时的差异
+- [ ] 添加更细粒度的打点，明确各阶段耗时占比
+- [ ] 验证所有阶段耗时统计正确
 - [ ] 代码审查
 - [ ] 提交修改
-- **Status:** completed
+- **Status:** in_progress
 
 ## Decisions Made
 | Decision | Rationale |

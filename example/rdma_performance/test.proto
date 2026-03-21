@@ -30,7 +30,9 @@ message PerfTestRequest {
 message PerfTestResponse {
       required string cpu_usage = 1;
       optional int64 result_checksum = 2;
-      optional uint64 sched_latency_ns = 3; // Server side scheduling latency from cut_in_msg to ProcessRpcRequest (ns)
+      optional uint64 sched_latency_ns = 3; // Server side total scheduling latency from cut_in_msg to ProcessRpcRequest (ns)
+      optional uint64 queue_latency_ns = 4; // Server side queue wait latency (ns)
+      optional uint64 switch_latency_ns = 5; // Server side context switch latency (ns)
 };
 
 service PerfTestService {

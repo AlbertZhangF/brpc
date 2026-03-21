@@ -52,7 +52,11 @@ public:
         brpc::ClosureGuard done_guard(done);
         // Get scheduling latency from cut_in_msg to now
         uint64_t sched_latency_ns = bthread_sched_latency_ns();
+        uint64_t queue_latency_ns = bthread_queue_latency_ns();
+        uint64_t switch_latency_ns = bthread_switch_latency_ns();
         response->set_sched_latency_ns(sched_latency_ns);
+        response->set_queue_latency_ns(queue_latency_ns);
+        response->set_switch_latency_ns(switch_latency_ns);
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         uint64_t now = butil::monotonic_time_us();
         if (now > last && now - last > 100000) {
