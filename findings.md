@@ -40,6 +40,8 @@
 |-------|------------|
 | 统计出现负数时间 | TaskMeta对象从资源池复用，旧的时间戳未清零，需要在start_background中初始化时间戳为0 |
 | 时间精度不足 | 原使用us单位，改为ns单位，提高统计精度 |
+| bvar重复暴露错误 | client中定义的LatencyRecorder名称自动加后缀后与bthread内部暴露的bvar变量重名，将client侧的统计变量重命名为client_前缀 |
+| std::invalid_argument stod异常 | 当bvar变量不存在时describe_exposed返回空字符串，添加空字符串判断，空值时使用默认值0 |
 
 ## Resources
 - [bthread文档](docs/cn/bthread.md)

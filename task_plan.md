@@ -94,7 +94,14 @@ Phase 10
 - [x] 链路统计变量名为rpc_link_sched_latency，可通过/vars接口查看
 - [x] 已修复所有代码逻辑问题，无逻辑错误
 - [x] 验证框架编译错误已解决
-- [ ] 提交所有修改
+- **Status:** completed
+
+### Phase 11: 修复运行时错误
+- [x] 修复bvar重复暴露错误：bthread_sched_latency等变量重复expose
+- [x] 修复std::invalid_argument stod异常导致的core dump
+- [x] 测试验证修复后的运行效果
+- [x] 调用superpowers:requesting-code-review进行代码审查
+- [x] 生成commit信息并执行git commit
 - **Status:** completed
 
 ## Decisions Made

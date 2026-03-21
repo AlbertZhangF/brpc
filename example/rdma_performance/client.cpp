@@ -59,9 +59,10 @@ DEFINE_int32(matrix_size, 0, "Size of the matrix");
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
 bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
-bvar::LatencyRecorder g_bthread_sched_latency("bthread_sched");
-bvar::LatencyRecorder g_bthread_queue_latency("bthread_queue");
-bvar::LatencyRecorder g_bthread_switch_latency("bthread_switch");
+// 重命名避免和bthread内部暴露的bvar变量重名
+bvar::LatencyRecorder g_bthread_sched_latency("client_bthread_sched");
+bvar::LatencyRecorder g_bthread_queue_latency("client_bthread_queue");
+bvar::LatencyRecorder g_bthread_switch_latency("client_bthread_switch");
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
@@ -305,14 +306,29 @@ void Test(int thread_num, int attachment_size) {
             << "ns, P99: " << g_bthread_switch_latency.latency_percentile(0.99) << "ns"
             << std::endl;
         // Print fine-grained scheduling statistics
-        uint64_t rq_retry_count = std::stoull(bvar::Variable::describe_exposed("bthread_rq_full_retry_count"));
-        uint64_t steal_success = std::stoull(bvar::Variable::describe_exposed("bthread_steal_success_count"));
-        uint64_t steal_fail = std::stoull(bvar::Variable::describe_exposed("bthread_steal_fail_count"));
-        double rq_retry_avg = std::stod(bvar::Variable::describe_exposed("bthread_rq_full_retry_latency_avg"));
-        double steal_avg = std::stod(bvar::Variable::describe_exposed("bthread_steal_latency_avg"));
-        double remote_lock_avg = std::stod(bvar::Variable::describe_exposed("bthread_remote_lock_wait_latency_avg"));
-        double link_sched_avg = std::stod(bvar::Variable::describe_exposed("bthread_link_sched_latency_avg"));
-        int64_t link_sched_p99 = std::stoll(bvar::Variable::describe_exposed("bthread_link_sched_latency_p99"));
+        std::string rq_retry_count_str = bvar::Variable::describe_exposed("bthread_rq_full_retry_count");
+        uint64_t rq_retry_count = rq_retry_count_str.empty() ? 0 : std::stoull(rq_retry_count_str);
+
+        std::string steal_success_str = bvar::Variable::describe_exposed("bthread_steal_success_count");
+        uint64_t steal_success = steal_success_str.empty() ? 0 : std::stoull(steal_success_str);
+
+        std::string steal_fail_str = bvar::Variable::describe_exposed("bthread_steal_fail_count");
+        uint64_t steal_fail = steal_fail_str.empty() ? 0 : std::stoull(steal_fail_str);
+
+        std::string rq_retry_avg_str = bvar::Variable::describe_exposed("bthread_rq_full_retry_latency_avg");
+        double rq_retry_avg = rq_retry_avg_str.empty() ? 0.0 : std::stod(rq_retry_avg_str);
+
+        std::string steal_avg_str = bvar::Variable::describe_exposed("bthread_steal_latency_avg");
+        double steal_avg = steal_avg_str.empty() ? 0.0 : std::stod(steal_avg_str);
+
+        std::string remote_lock_avg_str = bvar::Variable::describe_exposed("bthread_remote_lock_wait_latency_avg");
+        double remote_lock_avg = remote_lock_avg_str.empty() ? 0.0 : std::stod(remote_lock_avg_str);
+
+        std::string link_sched_avg_str = bvar::Variable::describe_exposed("bthread_link_sched_latency_avg");
+        double link_sched_avg = link_sched_avg_str.empty() ? 0.0 : std::stod(link_sched_avg_str);
+
+        std::string link_sched_p99_str = bvar::Variable::describe_exposed("bthread_link_sched_latency_p99");
+        int64_t link_sched_p99 = link_sched_p99_str.empty() ? 0 : std::stoll(link_sched_p99_str);
         std::cout << "Fine-grained Sched: RQ Full Retries: " << rq_retry_count
             << " (Avg: " << rq_retry_avg << "ns) | Steal Success: " << steal_success
             << " | Steal Fail: " << steal_fail << " (Avg Steal: " << steal_avg
