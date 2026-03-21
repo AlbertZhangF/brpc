@@ -25,6 +25,13 @@
 #include "bthread/bthread.h"
 #include "test.pb.h"
 
+// Declare bthread C functions
+extern "C" {
+uint64_t bthread_sched_latency_ns(void);
+uint64_t bthread_queue_latency_ns(void);
+uint64_t bthread_switch_latency_ns(void);
+}
+
 #ifdef BRPC_WITH_RDMA
 
 DEFINE_int32(port, 8002, "TCP Port of this server");
