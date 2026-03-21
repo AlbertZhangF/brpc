@@ -22,6 +22,7 @@
 #include "butil/time.h"
 #include "brpc/server.h"
 #include "bvar/variable.h"
+#include "bthread/bthread.h"
 #include "test.pb.h"
 
 #ifdef BRPC_WITH_RDMA
@@ -42,6 +43,9 @@ public:
               PerfTestResponse* response,
               google::protobuf::Closure* done) {
         brpc::ClosureGuard done_guard(done);
+        // Get scheduling latency from cut_in_msg to now
+        uint64_t sched_latency_ns = bthread_sched_latency_ns();
+        response->set_sched_latency_ns(sched_latency_ns);
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         uint64_t now = butil::monotonic_time_us();
         if (now > last && now - last > 100000) {

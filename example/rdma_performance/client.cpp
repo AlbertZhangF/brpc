@@ -63,6 +63,7 @@ bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
 bvar::LatencyRecorder g_bthread_sched_latency("client_bthread_sched");
 bvar::LatencyRecorder g_bthread_queue_latency("client_bthread_queue");
 bvar::LatencyRecorder g_bthread_switch_latency("client_bthread_switch");
+bvar::LatencyRecorder g_server_link_sched_latency("server_link_sched");
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
@@ -196,6 +197,13 @@ public:
         if (switch_ns > 0) {
             g_bthread_switch_latency << switch_ns; // store as ns
         }
+        // Record server side link scheduling latency from response
+        if (closure->resp->has_sched_latency_ns()) {
+            uint64_t link_sched_ns = closure->resp->sched_latency_ns();
+            if (link_sched_ns > 0) {
+                g_server_link_sched_latency << link_sched_ns;
+            }
+        }
         if (closure->resp->cpu_usage().size() > 0) {
             g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
         }
@@ -324,19 +332,13 @@ void Test(int thread_num, int attachment_size) {
 
         std::string remote_lock_avg_str = bvar::Variable::describe_exposed("bthread_remote_lock_wait_latency_latency_avg");
         double remote_lock_avg = remote_lock_avg_str.empty() ? 0.0 : std::stod(remote_lock_avg_str);
-
-        std::string link_sched_avg_str = bvar::Variable::describe_exposed("rpc_link_sched_latency_latency_avg");
-        double link_sched_avg = link_sched_avg_str.empty() ? 0.0 : std::stod(link_sched_avg_str);
-
-        std::string link_sched_p99_str = bvar::Variable::describe_exposed("rpc_link_sched_latency_latency_p99");
-        int64_t link_sched_p99 = link_sched_p99_str.empty() ? 0 : std::stoll(link_sched_p99_str);
         std::cout << "Fine-grained Sched: RQ Full Retries: " << rq_retry_count
             << " (Avg: " << rq_retry_avg << "ns) | Steal Success: " << steal_success
             << " | Steal Fail: " << steal_fail << " (Avg Steal: " << steal_avg
             << "ns) | Remote Lock Avg: " << remote_lock_avg << "ns"
             << std::endl;
-        std::cout << "Link Sched Latency (cut_in_msg to ProcessRpcRequest): Avg: " << link_sched_avg
-            << "ns, P99: " << link_sched_p99 << "ns" << std::endl;
+        std::cout << "Link Sched Latency (cut_in_msg to ProcessRpcRequest): Avg: " << g_server_link_sched_latency.latency(10)
+            << "ns, P99: " << g_server_link_sched_latency.latency_percentile(0.99) << "ns" << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
     }

@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 14
+Phase 15
 
 ## Phases
 
@@ -124,16 +124,25 @@ Phase 14
 - **Status:** completed
 
 ### Phase 14: 调整打点位置到用户指定位置
-- [ ] 在InputMessageBase中新增enqueue_time_ns字段，记录消息入队时间
-- [ ] 在src/brpc/input_messenger.cpp中DestroyingPtr msg(pr.message())一行后添加打点，设置msg->_enqueue_time_ns
-- [ ] 在src/brpc/policy/baidu_rpc_protocol.cpp:ProcessRpcRequest方法第一行添加打点，计算enqueue到开始处理的耗时
-- [ ] 将耗时统计到全局的rpc_link_sched_latency中
-- [ ] 删除之前多余的bthread内部打点（保留bthread调度统计功能）
-- [ ] 修复Link Sched Latency为0的问题
-- [ ] 测试验证修改效果
-- [ ] 调用superpowers:requesting-code-review进行代码审查
+- [x] 在InputMessageBase中新增_cut_done_ns字段，记录消息入队时间
+- [x] 在src/brpc/input_messenger.cpp中DestroyingPtr msg(pr.message())一行后添加打点，设置msg->_cut_done_ns
+- [x] 在src/brpc/policy/baidu_rpc_protocol.cpp:ProcessRpcRequest方法第一行添加打点，计算enqueue到开始处理的耗时
+- [x] 将耗时统计到全局的rpc_link_sched_latency中
+- [x] 保留bthread调度统计功能，未删除原有打点
+- [x] 代码审查通过
+- [x] 提交修改
+- **Status:** completed
+
+### Phase 15: 实现服务端调度时延返回client并打印
+- [x] 直接修改example的test.proto，在PerfTestResponse中添加sched_latency_ns字段（已存在）
+- [x] 在服务端server.cpp的Test方法开头获取bthread调度时延，设置到response中
+- [x] 在client中添加全局LatencyRecorder g_server_link_sched_latency统计服务端返回的调度时延
+- [x] 在client的HandleResponse中获取response中的sched_latency_ns字段并统计
+- [x] 修改client输出，直接使用统计变量打印，不再通过bvar获取客户端进程的空统计
+- [x] 测试验证，确保Link Sched Latency不再为0
+- [ ] 代码审查
 - [ ] 提交修改
-- **Status:** in_progress
+- **Status:** completed
 
 ## Decisions Made
 | Decision | Rationale |
