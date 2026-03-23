@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 18
+Phase 19
 
 ## Phases
 
@@ -169,6 +169,14 @@ Phase 18
 - [x] 分析Bthread Sched和Server Sched Breakdown的差异：分别是客户端和服务端的独立统计，数值差异正常
 - [x] 明确Link Sched Latency统计的是服务端耗时，由三个阶段组成
 - [x] 得出性能结论：队列等待占调度耗时99%以上，是核心瓶颈
+- [x] 将分析结果记录到findings.md
+- **Status:** completed
+
+### Phase 19: bthread任务生命周期与队列等待瓶颈分析
+- [x] 梳理bthread任务从创建到执行的完整7个阶段，标记所有打点位置和对应时间戳
+- [x] 分析Queue Wait的5类核心原因：锁竞争、worker不足、任务分配不均、批量提交延迟、优先级反转
+- [x] 提供每类问题的排查方法和优化方向
+- [x] 给出进一步定位问题的打点建议
 - [x] 将分析结果记录到findings.md
 - **Status:** completed
   - Avg Steal：偷取任务操作非常快，耗时小于时间精度，或者统计逻辑有问题
