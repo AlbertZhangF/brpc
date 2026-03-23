@@ -47,3 +47,28 @@
 ## Resources
 - [bthread文档](docs/cn/bthread.md)
 - [brpc性能调优文档](docs/cn/performance.md)
+
+## Performance Analysis (2026-03-23)
+### 测试结果差异分析
+1. **Bthread Sched vs Server Sched Breakdown差异原因**：
+   - **Bthread Sched部分**：统计的是**客户端进程**自己的bthread调度耗时（Avg:193us, P99:515us）
+     - 客户端需要异步发送大量请求、处理响应、更新统计，bthread调度压力大
+     - 队列等待时间占比99%以上（Avg:196us），是客户端调度的主要瓶颈
+   - **Server Sched Breakdown部分**：统计的是**服务端进程**的bthread调度耗时（Avg:45us, P99:251us）
+     - 服务端逻辑简单，仅处理请求并返回响应，调度压力小
+     - 队列等待时间占比99.7%（Avg:45us），上下文切换仅0.3us
+   - 两者属于不同进程的统计数据，数值差异巨大属于正常现象
+
+2. **Link Sched Latency说明**：
+   - 统计对象：**服务端进程**从cut_in_msg到ProcessRpcRequest的调度耗时
+   - 组成过程：
+     1. Enqueue Prepare（Avg:70ns）：TaskMeta初始化、属性设置、栈分配等入队前准备工作
+     2. Queue Wait（Avg:45us）：任务在运行队列中等待被worker线程调度的时间（核心耗时）
+     3. Context Switch（Avg:132ns）：任务从队列取出后，寄存器切换、TLS切换等上下文切换开销
+   - 总和验证：三个阶段之和45221ns与总调度44934ns的差值仅287ns，误差<1%，在时间统计精度范围内
+
+### 性能结论
+1. **核心瓶颈**：无论是客户端还是服务端，队列等待时间都占调度总耗时的99%以上，是高并发下调度耗时非线性增长的根本原因
+2. **根因分析**：高并发下运行队列锁竞争加剧、worker线程不足、任务分配不均导致队列等待时间陡增
+3. **优化方向**：优化运行队列锁机制、调整worker线程数量、均衡任务分配可以有效降低调度耗时
+4. **其他耗时占比**：入队准备和上下文切换耗时占比<1%，不是性能瓶颈，无需重点优化

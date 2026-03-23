@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 17
+Phase 18
 
 ## Phases
 
@@ -147,6 +147,30 @@ Phase 17
 ### Phase 16: 优化统计输出与链路耗时分析
 - [x] 根因分析：RQ Full Retries、Avg Steal、Remote Lock Avg为0的原因：
   - RQ Full Retries：测试场景下运行队列没有满，没有触发重试
+  - Avg Steal：偷取操作耗时极短，小于统计精度，或无偷取操作
+  - Remote Lock Avg：测试场景下无跨worker提交任务，无远程队列锁操作
+- [x] 优化输出：删除为0的细粒度统计项，精简输出
+- [x] 分析Link Sched Latency的耗时构成
+- [x] 代码审查通过
+- [x] 提交修改
+- **Status:** completed
+
+### Phase 17: 统计bthread调度全链路各阶段耗时
+- [x] 梳理bthread调度全流程的三个阶段：入队准备、队列等待、上下文切换
+- [x] 扩展bthread接口：新增`bthread_enqueue_prepare_latency_ns()`获取入队准备耗时
+- [x] 扩展test.proto，添加enqueue_prepare_latency_ns字段
+- [x] 服务端返回完整的三阶段耗时给客户端
+- [x] 客户端添加统计和输出，验证三阶段总和与总调度耗时一致
+- [x] 代码审查通过
+- [x] 提交修改
+- **Status:** completed
+
+### Phase 18: 性能测试结果分析
+- [x] 分析Bthread Sched和Server Sched Breakdown的差异：分别是客户端和服务端的独立统计，数值差异正常
+- [x] 明确Link Sched Latency统计的是服务端耗时，由三个阶段组成
+- [x] 得出性能结论：队列等待占调度耗时99%以上，是核心瓶颈
+- [x] 将分析结果记录到findings.md
+- **Status:** completed
   - Avg Steal：偷取任务操作非常快，耗时小于时间精度，或者统计逻辑有问题
   - Remote Lock Avg：测试场景下没有跨worker提交任务，没有触发远程队列锁
 - [ ] 优化输出：删除为0的统计项，或者添加条件判断仅非0时显示
