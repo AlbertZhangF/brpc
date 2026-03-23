@@ -698,4 +698,15 @@ uint64_t bthread_switch_latency_ns(void) {
     return 0;
 }
 
+uint64_t bthread_enqueue_prepare_latency_ns(void) {
+    bthread::TaskGroup* g = bthread::tls_task_group;
+    if (g != NULL && !g->is_current_main_task()) {
+        bthread::TaskMeta* m = g->current_task();
+        if (m->enqueue_ns > 0 && m->create_ns > 0) {
+            return m->enqueue_ns - m->create_ns;
+        }
+    }
+    return 0;
+}
+
 }  // extern "C"

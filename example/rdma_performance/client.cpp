@@ -64,6 +64,7 @@ bvar::LatencyRecorder g_bthread_sched_latency("client_bthread_sched");
 bvar::LatencyRecorder g_bthread_queue_latency("client_bthread_queue");
 bvar::LatencyRecorder g_bthread_switch_latency("client_bthread_switch");
 bvar::LatencyRecorder g_server_link_sched_latency("server_link_sched");
+bvar::LatencyRecorder g_server_enqueue_prepare_latency("server_enqueue_prepare");
 bvar::LatencyRecorder g_server_queue_latency("server_queue");
 bvar::LatencyRecorder g_server_switch_latency("server_switch");
 butil::atomic<uint64_t> g_last_time(0);
@@ -206,6 +207,12 @@ public:
                 g_server_link_sched_latency << link_sched_ns;
             }
         }
+        if (closure->resp->has_enqueue_prepare_latency_ns()) {
+            uint64_t prepare_ns = closure->resp->enqueue_prepare_latency_ns();
+            if (prepare_ns > 0) {
+                g_server_enqueue_prepare_latency << prepare_ns;
+            }
+        }
         if (closure->resp->has_queue_latency_ns()) {
             uint64_t queue_ns = closure->resp->queue_latency_ns();
             if (queue_ns > 0) {
@@ -329,10 +336,19 @@ void Test(int thread_num, int attachment_size) {
             << std::endl;
         std::cout << "Link Sched Latency (cut_in_msg to ProcessRpcRequest): Avg: " << g_server_link_sched_latency.latency(10)
             << "ns, P99: " << g_server_link_sched_latency.latency_percentile(0.99) << "ns" << std::endl;
-        std::cout << "Server Sched Breakdown: Queue Wait Avg: " << g_server_queue_latency.latency(10)
+        std::cout << "Server Sched Breakdown: Enqueue Prepare Avg: " << g_server_enqueue_prepare_latency.latency(10)
+            << "ns, P99: " << g_server_enqueue_prepare_latency.latency_percentile(0.99)
+            << "ns | Queue Wait Avg: " << g_server_queue_latency.latency(10)
             << "ns, P99: " << g_server_queue_latency.latency_percentile(0.99)
             << "ns | Context Switch Avg: " << g_server_switch_latency.latency(10)
             << "ns, P99: " << g_server_switch_latency.latency_percentile(0.99) << "ns" << std::endl;
+        // Verify sum of phases equals total latency (should be very close)
+        uint64_t sum_avg = (uint64_t)g_server_enqueue_prepare_latency.latency(10)
+                         + (uint64_t)g_server_queue_latency.latency(10)
+                         + (uint64_t)g_server_switch_latency.latency(10);
+        std::cout << "Verification: Sum of phases Avg: " << sum_avg
+                  << "ns, Total Sched Avg: " << (uint64_t)g_server_link_sched_latency.latency(10)
+                  << "ns (difference: " << (int64_t)(sum_avg - g_server_link_sched_latency.latency(10)) << "ns)" << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
     }

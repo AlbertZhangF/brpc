@@ -28,6 +28,7 @@
 // Declare bthread C functions
 extern "C" {
 uint64_t bthread_sched_latency_ns(void);
+uint64_t bthread_enqueue_prepare_latency_ns(void);
 uint64_t bthread_queue_latency_ns(void);
 uint64_t bthread_switch_latency_ns(void);
 }
@@ -52,9 +53,11 @@ public:
         brpc::ClosureGuard done_guard(done);
         // Get scheduling latency from cut_in_msg to now
         uint64_t sched_latency_ns = bthread_sched_latency_ns();
+        uint64_t enqueue_prepare_latency_ns = bthread_enqueue_prepare_latency_ns();
         uint64_t queue_latency_ns = bthread_queue_latency_ns();
         uint64_t switch_latency_ns = bthread_switch_latency_ns();
         response->set_sched_latency_ns(sched_latency_ns);
+        response->set_enqueue_prepare_latency_ns(enqueue_prepare_latency_ns);
         response->set_queue_latency_ns(queue_latency_ns);
         response->set_switch_latency_ns(switch_latency_ns);
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);

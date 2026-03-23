@@ -458,6 +458,16 @@ extern uint64_t bthread_queue_latency_ns(void);
  */
 extern uint64_t bthread_switch_latency_ns(void);
 
+/**
+ * @brief Retrieves the enqueue prepare latency of the current bthread.
+ *
+ * This function returns the time (in nanoseconds) from when the bthread was
+ * created to when it was enqueued into the runqueue.
+ *
+ * @return uint64_t Enqueue prepare latency in nanoseconds, 0 if not available.
+ */
+extern uint64_t bthread_enqueue_prepare_latency_ns(void);
+
 __END_DECLS
 
 #endif  // BTHREAD_BTHREAD_H
