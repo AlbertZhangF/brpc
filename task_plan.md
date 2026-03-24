@@ -4,7 +4,7 @@
 分析brpc框架中bthread调度耗时随并发非线性增长的问题，在bthread中添加精细的打点统计，在rdma_performance示例中输出调度各阶段的平均时延和P99时延，并定位性能瓶颈。
 
 ## Current Phase
-Phase 19
+Phase 20
 
 ## Phases
 
@@ -188,6 +188,17 @@ Phase 19
 - [ ] 代码审查
 - [ ] 提交修改
 - **Status:** in_progress
+
+### Phase 20: 新增5项细粒度统计功能
+- [x] 统计运行队列push操作的锁等待时间：新增bvar `bthread_rq_push_lock_latency`，统计远程队列push操作的锁等待时间 ✅ 代码审查通过
+- [x] 统计每个worker队列的长度变化：
+  - [x] 新增passive bvar `bthread_total_rq_size`，统计所有worker队列总长度
+  - [x] 新增per-worker队列长度统计，每个worker单独暴露`bthread_worker_N_rq_size`队列长度变量 ✅ 代码审查通过
+- [x] 统计任务偷取的成功率、失败次数、偷取耗时：已有`bthread_steal_success_count`、`bthread_steal_fail_count`、`bthread_steal_latency`统计变量，已验证正常工作 ✅ 代码审查通过
+- [x] 统计worker线程的空闲率：新增passive bvar `bthread_worker_idle_rate`，自动计算worker空闲率 ✅ 代码审查通过
+- [x] 统计批量提交的flush延迟：新增bvar `bthread_batch_flush_latency`，统计批量提交从第一个任务入队到flush的延迟 ✅ 代码审查通过
+- [x] 完成代码后进行代码审查并提交 ✅ 代码审查已通过
+- **Status:** completed
 
 ## Decisions Made
 | Decision | Rationale |

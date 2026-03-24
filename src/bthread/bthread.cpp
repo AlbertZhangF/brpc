@@ -47,8 +47,27 @@ bvar::Adder<uint64_t> g_steal_success_count("bthread_steal_success_count");
 bvar::Adder<uint64_t> g_steal_fail_count("bthread_steal_fail_count");
 bvar::LatencyRecorder g_steal_latency("bthread_steal_latency");
 bvar::LatencyRecorder g_remote_lock_wait_latency("bthread_remote_lock_wait_latency");
+bvar::LatencyRecorder g_rq_push_lock_latency("bthread_rq_push_lock_latency"); // Run queue push lock wait time
+bvar::LatencyRecorder g_batch_flush_latency("bthread_batch_flush_latency"); // Batch submit flush latency
+bvar::Adder<uint64_t> g_worker_idle_time_ns("bthread_worker_idle_time_ns"); // Total worker idle time
 // Link level scheduling latency: from cut_in_msg done to ProcessRpcRequest start
 bvar::LatencyRecorder g_link_sched_latency("bthread_link_sched_latency");
+
+// Get total run queue size across all workers
+static int64_t get_total_rq_size(void*) {
+    TaskControl* c = get_task_control();
+    if (!c) {
+        return 0;
+    }
+    int64_t total = 0;
+    c->for_each_task_group([&](TaskGroup* g) {
+        if (g) {
+            total += g->rq_size();
+        }
+    });
+    return total;
+}
+static bvar::PassiveStatus<int64_t> g_total_rq_size("bthread_total_rq_size", get_total_rq_size, NULL);
 
 static bool validate_bthread_concurrency(const char*, int32_t val) {
     // bthread_setconcurrency sets the flag on success path which should

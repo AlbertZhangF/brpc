@@ -164,7 +164,13 @@ bool TaskGroup::wait_task(bthread_t* tid) {
         if (_last_pl_state.stopped()) {
             return false;
         }
+        uint64_t idle_start = butil::cpuwide_time_ns();
         _pl->wait(_last_pl_state);
+        uint64_t idle_end = butil::cpuwide_time_ns();
+        // Record idle time
+        extern bvar::Adder<uint64_t> g_worker_idle_time_ns;
+        uint64_t idle_duration = idle_end - idle_start;
+        g_worker_idle_time_ns << idle_duration;
         if (steal_task(tid)) {
             return true;
         }
@@ -176,7 +182,13 @@ bool TaskGroup::wait_task(bthread_t* tid) {
         if (steal_task(tid)) {
             return true;
         }
+        uint64_t idle_start = butil::cpuwide_time_ns();
         _pl->wait(st);
+        uint64_t idle_end = butil::cpuwide_time_ns();
+        // Record idle time
+        extern bvar::Adder<uint64_t> g_worker_idle_time_ns;
+        uint64_t idle_duration = idle_end - idle_start;
+        g_worker_idle_time_ns << idle_duration;
 #endif
     } while (true);
 }
@@ -195,10 +207,51 @@ int64_t TaskGroup::cumulated_cputime_ns() const {
     return cumulated_cputime_ns;
 }
 
+// Worker start time for calculating total elapsed time
+static butil::atomic<uint64_t> s_worker_start_time(0);
+// Worker counter for per-worker metrics
+static butil::atomic<int> s_worker_counter(0);
+
+// Get queue size for this worker
+static size_t get_worker_rq_size(void* arg) {
+    TaskGroup* g = static_cast<TaskGroup*>(arg);
+    return g->rq_size();
+}
+
+static double get_worker_idle_rate(void*) {
+    extern bvar::Adder<uint64_t> g_worker_idle_time_ns;
+    uint64_t now = butil::cpuwide_time_ns();
+    uint64_t start_time = s_worker_start_time.load(butil::memory_order_acquire);
+    if (start_time == 0 || now <= start_time) {
+        return 0.0;
+    }
+    uint64_t total_elapsed = now - start_time;
+    int concurrency = bthread_getconcurrency();
+    if (concurrency <= 0) {
+        return 0.0;
+    }
+    uint64_t total_idle = g_worker_idle_time_ns.get_value();
+    return static_cast<double>(total_idle) / (total_elapsed * concurrency);
+}
+
 void TaskGroup::run_main_task() {
+    // Record worker start time if not set yet
+    uint64_t expected = 0;
+    uint64_t now = butil::cpuwide_time_ns();
+    s_worker_start_time.compare_exchange_strong(expected, now, butil::memory_order_release);
+
     bvar::PassiveStatus<double> cumulated_cputime(
         get_cumulated_cputime_from_this, this);
     std::unique_ptr<bvar::PerSecond<bvar::PassiveStatus<double> > > usage_bvar;
+
+    // Expose worker idle rate
+    static bvar::PassiveStatus<double> s_worker_idle_rate("bthread_worker_idle_rate", get_worker_idle_rate, NULL);
+
+    // Expose per-worker queue size
+    char name[64];
+    int worker_id = s_worker_counter.fetch_add(1, butil::memory_order_relaxed);
+    snprintf(name, sizeof(name), "bthread_worker_%d_rq_size", worker_id);
+    _rq_size_bvar.reset(new bvar::PassiveStatus<size_t>(name, get_worker_rq_size, this));
 
     TaskGroup* dummy = this;
     bthread_t tid;
@@ -848,6 +901,9 @@ void TaskGroup::ready_to_run(TaskMeta* meta, bool nosignal) {
     meta->enqueue_ns = butil::cpuwide_time_ns(); // Record enqueue time
     push_rq(meta->tid);
     if (nosignal) {
+        if (_num_nosignal == 0) {
+            _first_nosignal_submit_ns = butil::cpuwide_time_ns();
+        }
         ++_num_nosignal;
     } else {
         const int additional_signal = _num_nosignal;
@@ -862,6 +918,10 @@ void TaskGroup::flush_nosignal_tasks() {
     if (val) {
         _num_nosignal = 0;
         _nsignaled += val;
+        // Record batch flush latency
+        extern bvar::LatencyRecorder g_batch_flush_latency;
+        g_batch_flush_latency << (butil::cpuwide_time_ns() - _first_nosignal_submit_ns);
+        _first_nosignal_submit_ns = 0;
         _control->signal_task(val, _tag);
     }
 }
@@ -875,7 +935,10 @@ void TaskGroup::ready_to_run_remote(TaskMeta* meta, bool nosignal) {
     _remote_rq._mutex.lock();
     // Record remote queue lock wait latency
     extern bvar::LatencyRecorder g_remote_lock_wait_latency;
-    g_remote_lock_wait_latency << (butil::cpuwide_time_ns() - lock_start);
+    extern bvar::LatencyRecorder g_rq_push_lock_latency;
+    uint64_t lock_wait = butil::cpuwide_time_ns() - lock_start;
+    g_remote_lock_wait_latency << lock_wait;
+    g_rq_push_lock_latency << lock_wait;
     while (!_remote_rq.push_locked(meta->tid)) {
         flush_nosignal_tasks_remote_locked(_remote_rq._mutex);
         LOG_EVERY_SECOND(ERROR) << "_remote_rq is full, capacity="

@@ -351,6 +351,7 @@ friend class TaskControl;
     // the control that this group belongs to
     TaskControl* _control{NULL};
     int _num_nosignal{0};
+    uint64_t _first_nosignal_submit_ns{0}; // First nosignal task submit time for batch flush latency
     int _nsignaled{0};
     AtomicCPUTimeStat _cpu_time_stat;
     // last thread cpu clock
@@ -379,6 +380,9 @@ friend class TaskControl;
 
     // Worker thread id.
     pthread_t _tid{};
+
+    // Per-worker queue size bvar
+    std::unique_ptr<bvar::PassiveStatus<size_t>> _rq_size_bvar;
 };
 
 }  // namespace bthread
