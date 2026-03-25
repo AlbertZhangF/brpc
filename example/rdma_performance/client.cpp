@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <vector>
+#include <iomanip>
 #include <gflags/gflags.h>
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
@@ -349,6 +350,59 @@ void Test(int thread_num, int attachment_size) {
         std::cout << "Verification: Sum of phases Avg: " << sum_avg
                   << "ns, Total Sched Avg: " << (uint64_t)g_server_link_sched_latency.latency(10)
                   << "ns (difference: " << (int64_t)(sum_avg - g_server_link_sched_latency.latency(10)) << "ns)" << std::endl;
+
+        // Print new fine-grained bthread scheduling statistics
+        std::cout << "=== Fine-grained Bthread Scheduling Statistics ===" << std::endl;
+
+        // Helper function to get latency avg
+        auto get_latency_avg = [](const std::string& name) -> double {
+            std::string val = bvar::Variable::describe_exposed(name + "_latency_avg");
+            return val.empty() ? 0.0 : std::stod(val);
+        };
+
+        // Helper function to get counter value
+        auto get_counter = [](const std::string& name) -> uint64_t {
+            std::string val = bvar::Variable::describe_exposed(name);
+            return val.empty() ? 0 : std::stoull(val);
+        };
+
+        // Helper function to get passive status value
+        auto get_passive = [](const std::string& name) -> double {
+            std::string val = bvar::Variable::describe_exposed(name);
+            return val.empty() ? 0.0 : std::stod(val);
+        };
+
+        // Run queue push lock latency
+        double rq_push_lock_avg = get_latency_avg("bthread_rq_push_lock_latency");
+        if (rq_push_lock_avg > 0) {
+            std::cout << "Run Queue Push Lock Latency: Avg: " << (uint64_t)rq_push_lock_avg << "ns" << std::endl;
+        }
+
+        // Batch flush latency
+        double batch_flush_avg = get_latency_avg("bthread_batch_flush_latency");
+        if (batch_flush_avg > 0) {
+            std::cout << "Batch Flush Latency: Avg: " << (uint64_t)batch_flush_avg << "ns" << std::endl;
+        }
+
+        // Task steal statistics
+        uint64_t steal_success = get_counter("bthread_steal_success_count");
+        uint64_t steal_fail = get_counter("bthread_steal_fail_count");
+        double steal_latency_avg = get_latency_avg("bthread_steal_latency");
+        if (steal_success + steal_fail > 0) {
+            double steal_rate = (double)steal_success / (steal_success + steal_fail) * 100;
+            std::cout << "Task Steal: Success: " << steal_success
+                      << ", Fail: " << steal_fail
+                      << ", Success Rate: " << std::fixed << std::setprecision(2) << steal_rate << "%"
+                      << ", Avg Latency: " << (uint64_t)steal_latency_avg << "ns" << std::endl;
+        }
+
+        // Worker idle rate
+        double idle_rate = get_passive("bthread_worker_idle_rate");
+        std::cout << "Worker Idle Rate: " << std::fixed << std::setprecision(2) << (idle_rate * 100) << "%" << std::endl;
+
+        // Total run queue size
+        int64_t total_rq_size = (int64_t)get_passive("bthread_total_rq_size");
+        std::cout << "Total Run Queue Size: " << total_rq_size << " tasks" << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
     }

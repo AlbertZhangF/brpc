@@ -195,9 +195,17 @@ Phase 20
   - [x] 新增passive bvar `bthread_total_rq_size`，统计所有worker队列总长度
   - [x] 新增per-worker队列长度统计，每个worker单独暴露`bthread_worker_N_rq_size`队列长度变量 ✅ 代码审查通过
 - [x] 统计任务偷取的成功率、失败次数、偷取耗时：已有`bthread_steal_success_count`、`bthread_steal_fail_count`、`bthread_steal_latency`统计变量，已验证正常工作 ✅ 代码审查通过
-- [x] 统计worker线程的空闲率：新增passive bvar `bthread_worker_idle_rate`，自动计算worker空闲率 ✅ 代码审查通过
+- [x] 统计worker线程的空闲率：新增bvar `bthread_worker_idle_rate`，自动计算worker空闲率 ✅ 代码审查通过
 - [x] 统计批量提交的flush延迟：新增bvar `bthread_batch_flush_latency`，统计批量提交从第一个任务入队到flush的延迟 ✅ 代码审查通过
 - [x] 完成代码后进行代码审查并提交 ✅ 代码审查已通过
+- **Status:** completed
+
+### Phase 21: 将新增统计指标在client最终输出中打印
+- [x] 分析client.cpp现有输出格式，保持风格一致 ✅ 输出格式与现有指标对齐
+- [x] 新增客户端统计变量，对应5项新增指标 ✅ 使用bvar::describe_exposed获取指标值
+- [x] 在最终输出部分添加新增指标的打印 ✅ 仅非零指标打印，保持输出简洁
+- [x] 代码审查 ✅ 通过superpowers:code-reviewer审查
+- [ ] 提交修改
 - **Status:** completed
 
 ## Decisions Made
