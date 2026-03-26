@@ -618,3 +618,78 @@ task_runner -> 任务函数返回
 | 上下文切换耗时 | `start_exec_ns - dequeue_ns` | 任务出队到开始执行的切换开销，通常<1us |
 | 总调度耗时 | `start_exec_ns - create_ns` | 从任务创建到开始执行的总时间，等于上述三个阶段耗时之和 |
 | 任务执行耗时 | `finish_exec_ns - start_exec_ns` | 任务函数实际执行的时间 |
+
+---
+
+### 5.4 bthread内部模块关系图
+```mermaid
+graph TD
+    A[对外接口层<br>bthread.h] --> B[调度核心层]
+    B --> C[资源管理层]
+    C --> D[基础工具层]
+
+    subgraph 对外接口层
+        A1[bthread_create<br>bthread_mutex<br>bthread_cond<br>bthread_usleep]
+    end
+
+    subgraph 调度核心层
+        B1[TaskGroup<br>每个Worker对应一个]
+        B2[Worker线程<br>内核线程，执行协程]
+        B3[WorkStealingQueue<br>本地运行队列]
+        B4[RemoteQueue<br>远程提交队列]
+        B5[Scheduler<br>调度逻辑，工作窃取]
+        B1 --> B3
+        B1 --> B4
+        B1 --> B5
+        B2 --> B1
+    end
+
+    subgraph 资源管理层
+        C1[TaskMeta池<br>协程元数据对象池]
+        C2[StackAllocator<br>栈内存分配器]
+        C3[KeyManager<br>局部存储key管理]
+        C1 --> C2
+    end
+
+    subgraph 基础工具层
+        D1[butil::Mutex<br>同步原语]
+        D2[butil::ObjectPool<br>对象池]
+        D3[butil::Time<br>时间工具]
+    end
+```
+
+#### 模块说明
+- **对外接口层**：提供用户可调用的公开API，所有bthread功能都通过这层暴露
+- **调度核心层**：bthread的核心，负责协程的调度、队列管理、工作窃取等
+- **资源管理层**：负责协程元数据、栈内存、局部存储等资源的分配和复用
+- **基础工具层**：依赖butil的基础工具，实现无锁队列、对象池、时间获取等能力
+
+---
+
+### 5.5 bthread核心对象关系图
+```mermaid
+graph TD
+    W[Worker线程<br>内核态线程] -->|1:1| TG[TaskGroup<br>协程调度组]
+    TG -->|持有| LQ[WorkStealingQueue<br>本地运行队列]
+    TG -->|持有| RQ[RemoteQueue<br>远程提交队列]
+    LQ -->|存储多个| TM[TaskMeta<br>协程元数据]
+    RQ -->|存储多个| TM
+    TM -->|持有| S[Stack<br>协程栈内存]
+    TM -->|持有| CTX[Context<br>寄存器上下文]
+    TM -->|持有| TLS[Thread Local Storage<br>协程局部存储]
+    SA[StackAllocator<br>栈分配器] -->|分配/回收| S
+    TMP[TaskMetaPool<br>元数据对象池] -->|分配/回收| TM
+```
+
+#### 对象说明
+| 对象 | 数量关系 | 核心职责 |
+|------|----------|----------|
+| Worker线程 | 等于bthread_concurrency配置值，默认等于CPU核数 | 内核级线程，执行bthread任务 |
+| TaskGroup | 每个Worker对应1个 | 协程调度核心，管理本地队列、远程队列和调度逻辑 |
+| WorkStealingQueue | 每个TaskGroup 1个 | 无锁队列，存储本地提交的任务，支持其他Worker偷取 |
+| RemoteQueue | 每个TaskGroup 1个 | 有锁队列，存储非Worker线程提交的远程任务 |
+| TaskMeta | 每个运行中的bthread对应1个，复用对象池 | 协程元数据，保存上下文、栈指针、状态、时间戳等所有信息 |
+| Stack | 每个TaskMeta对应1个，复用栈分配器 | 协程栈内存，默认32KB，大栈可配置 |
+| Context | 每个TaskMeta对应1个 | 保存协程的寄存器上下文，用于上下文切换 |
+| StackAllocator | 全局1个 | 管理协程栈内存的分配和复用，避免频繁内存申请 |
+| TaskMetaPool | 全局1个 | 管理TaskMeta对象的分配和复用 |

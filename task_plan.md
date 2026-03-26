@@ -273,6 +273,13 @@ Phase 20
 - [x] 补充了模块级视图说明，解释了两种视图的适用场景和互补关系
 - **Status:** completed
 
+### Phase 31: 补充bthread模块与对象关系图
+- [x] 在第5章新增bthread内部模块关系图，分为对外接口层、调度核心层、资源管理层、基础工具层4层，清晰展示模块调用关系
+- [x] 新增bthread核心对象关系图，展示Worker/TaskGroup/Queue/TaskMeta/Stack等核心对象的持有和数量关系
+- [x] 补充详细的模块说明和对象说明，解释每个模块/对象的职责和交互逻辑
+- [x] 所有关系完全符合bthread源码实现
+- **Status:** completed
+
 ## Current Phase
 All phases completed
 
