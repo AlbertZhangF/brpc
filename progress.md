@@ -1,61 +1,95 @@
 # Progress Log
 
-## Session: 2026-03-19
+## Session: 2026-03-26
 
-### Current Status
-- **Phase:** 3 - 打点功能实现
-- **Started:** 2026-03-19
+### Phase 1: 代码探索与架构理解
+- **Status:** complete
+- **Started:** 2026-03-26
+- Actions taken:
+  - 创建规划文件task_plan.md, findings.md, progress.md
+  - 读取CLAUDE.md了解项目结构
+  - 读取brpc_architecture_and_workflow.md了解已有分析内容
+  - 探索EventDispatcher、Socket、InputMessenger、Acceptor核心代码
+  - 分析epoll事件循环机制、IOEventData回调机制
+  - 理解WriteRequest队列、KeepWrite线程机制
+- Files created/modified:
+  - task_plan.md (created)
+  - findings.md (created)
+  - progress.md (created)
 
-### Actions Taken
-1. 完成Phase 1代码调研：
-   - 定位了ProcessNewMessage -> CutInputMessage -> QueueMessage -> bthread_start_background -> ProcessInputMessage -> ProcessRpcRequest的完整流程
-   - 分析了bthread调度的核心源码：TaskGroup、TaskMeta、work-stealing队列等
-   - 调研了brpc通用统计方式：bvar::LatencyRecorder、butil::cpuwide_time_us等
-   - 将调研结果记录到findings.md
-2. 完成Phase 2方案设计：
-   - 确定了需要统计的四个关键时间点：任务创建、入队、出队、开始执行
-   - 设计了统计数据结构：TaskMeta添加时间戳字段，全局LatencyRecorder统计各阶段耗时
-   - 设计了输出格式：与现有Avg-Latency、P99格式保持一致
-   - 将设计方案记录到findings.md
-3. 完成Phase 3全部实现工作：
-   - **bthread侧打点实现**：
-     - 修改src/bthread/task_meta.h，在TaskMeta结构中添加create_us、enqueue_us、dequeue_us、start_exec_us四个时间戳字段
-     - 修改src/bthread/bthread.cpp，添加三个全局LatencyRecorder：g_sched_latency、g_queue_latency、g_switch_latency
-     - 修改src/bthread/task_group.cpp的start_background函数，记录任务创建时间
-     - 修改ready_to_run和ready_to_run_remote函数，记录任务入队时间
-     - 修改sched_to函数，记录任务出队时间
-     - 修改task_runner函数，记录任务开始执行时间，并计算各阶段耗时更新到全局统计变量
-   - **新增调度统计接口**：
-     - 修改src/bthread/bthread.h，添加三个接口声明：bthread_sched_latency_us()、bthread_queue_latency_us()、bthread_switch_latency_us()
-     - 修改src/bthread/bthread.cpp，实现这三个接口，方便上层应用获取当前bthread的调度耗时
-   - **rdma_performance示例集成**：
-     - 修改example/rdma_performance/client.cpp，添加三个LatencyRecorder统计每个请求的bthread调度耗时
-     - 在HandleResponse回调中调用新增的接口获取调度耗时并记录
-     - 在测试结束后的输出中添加bthread调度相关的Avg和P99时延统计，与原有格式保持一致
-4. 更新task_plan.md，标记Phase 3完成，进入Phase 4测试验证阶段
-5. 修复测试中发现的bug：
-   - 负数时间bug：TaskMeta从对象池复用，旧时间戳未清零，在start_background中新增初始化逻辑，将四个时间戳清零
-   - 时间单位调整：将所有时间统计从us改为ns，提高精度
-   - 调整接口：将bthread_sched_latency_us等接口改为bthread_sched_latency_ns，返回ns单位
-   - 调整client输出：统计时将ns转换为us存储，保持输出可读性
-6. 所有修改已完成，等待重新编译测试
-7. Phase 8细粒度调度打点实现：
-   - 添加队列满重试统计：统计push_rq时的重试次数和重试耗时
-   - 添加任务偷取统计：统计steal_task的成功/失败次数、偷取耗时
-   - 添加远程队列锁竞争统计：统计ready_to_run_remote中锁等待时间
-   - 新增5个bvar统计变量，支持全局查看细粒度指标
-   - 所有打点逻辑添加完成，可通过/vars接口查看或者在client中输出
-8. Phase 9完善client输出与链路打点：
-   - 在client输出中添加细粒度调度统计信息的打印，包括队列满重试次数、偷取成功/失败次数、各阶段平均耗时
-   - 在InputMessageBase中添加_cut_done_ns字段，记录cut_in_msg完成时间
-   - 在ProcessNewMessage中cut_in_msg成功后设置_cut_done_ns时间戳
-   - 在ProcessRpcRequest开头计算cut_in_msg到ProcessRpcRequest的耗时，更新到全局统计
-   - 链路打点完成，验证了bthread调度耗时与这段链路耗时的一致性
+### Phase 2: Read流程深度分析
+- **Status:** complete
+- Actions taken:
+  - 分析Acceptor连接建立流程
+  - 分析Socket::OnInputEvent事件处理
+  - 分析InputMessenger::OnNewMessages消息读取
+  - 分析Socket::DoRead零拷贝读取
+  - 分析ProcessNewMessage消息解析分发
+- Files created/modified:
+  - findings.md (updated)
 
-### Test Results
-| Test | Expected | Actual | Status |
-|------|----------|--------|--------|
+### Phase 3: Write流程深度分析
+- **Status:** complete
+- Actions taken:
+  - 分析客户端连接建立流程(Socket::Connect)
+  - 分析Socket::Write和StartWrite流程
+  - 分析KeepWrite线程机制
+  - 分析WaitEpollOut等待机制
+  - 分析Socket::DoWrite批量写入
+- Files created/modified:
+  - findings.md (updated)
 
-### Errors
-| Error | Resolution |
-|-------|------------|
+### Phase 4: 端到端流程整合
+- **Status:** complete
+- Actions taken:
+  - 整合Read和Write流程
+  - 绘制服务端完整收发流程时序图
+  - 绘制客户端完整收发流程时序图
+  - 绘制模块关系总览图
+  - 总结关键设计点
+- Files created/modified:
+  - findings.md (updated)
+
+### Phase 5: 文档编写与验证
+- **Status:** complete
+- Actions taken:
+  - 编写第6章节完整内容
+  - 添加EventDispatcher事件循环机制
+  - 添加Socket核心机制
+  - 添加Read流程深度分析
+  - 添加Write流程深度分析
+  - 添加零拷贝机制详解
+  - 添加端到端完整流程图
+  - 添加模块关系总览图
+  - 添加关键设计总结
+  - 验证文档完整性
+- Files created/modified:
+  - brpc_architecture_and_workflow.md (updated)
+
+## Test Results
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| 文档完整性检查 | 查看第6章节 | 包含所有必要内容 | 包含6.1-6.9所有小节 | ✓ |
+| 时序图检查 | 查看mermaid图 | 正确显示流程 | 6个时序图正确 | ✓ |
+| 模块关系图检查 | 查看mermaid图 | 正确显示关系 | 4个模块关系图正确 | ✓ |
+| 代码片段检查 | 查看代码示例 | 关键代码完整 | 核心代码片段完整 | ✓ |
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+|      |       |          |        |        |
+
+## Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+|           |       | 1       |            |
+
+## 5-Question Reboot Check
+| Question | Answer |
+|----------|--------|
+| Where am I? | 所有Phase已完成 |
+| Where am I going? | 任务已完成 |
+| What's the goal? | 深入分析brpc底层IO与Socket交互，补充文档 - 已完成 |
+| What have I learned? | 见findings.md |
+| What have I done? | 完成第6章节编写，包含9个小节、6个时序图、4个模块关系图 |
+
+---
+*Update after completing each phase or encountering errors*

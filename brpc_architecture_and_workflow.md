@@ -693,3 +693,897 @@ graph TD
 | Context | 每个TaskMeta对应1个 | 保存协程的寄存器上下文，用于上下文切换 |
 | StackAllocator | 全局1个 | 管理协程栈内存的分配和复用，避免频繁内存申请 |
 | TaskMetaPool | 全局1个 | 管理TaskMeta对象的分配和复用 |
+
+---
+
+## 6. brpc底层IO与Socket交互机制
+
+本章节深入分析brpc框架底层write/read与epoll/socket的交互机制，梳理端到端的收发完整流程。
+
+### 6.1 核心组件概览
+
+brpc的底层IO机制由以下几个核心组件构成：
+
+| 组件 | 源码位置 | 核心职责 |
+|------|----------|----------|
+| **EventDispatcher** | `src/brpc/event_dispatcher.h/cpp` | epoll/kqueue封装，事件循环管理 |
+| **Socket** | `src/brpc/socket.h/cpp` | 文件描述符抽象，读写操作封装 |
+| **InputMessenger** | `src/brpc/input_messenger.h/cpp` | 输入消息处理，协议解析分发 |
+| **Acceptor** | `src/brpc/acceptor.h/cpp` | 服务端连接接受，Socket生命周期管理 |
+| **IOEventData** | `src/brpc/event_dispatcher.h` | IO事件回调封装 |
+| **butil::IOBuf** | `src/butil/iobuf.h` | 零拷贝缓冲区 |
+
+### 6.2 EventDispatcher事件循环机制
+
+#### 6.2.1 架构设计
+EventDispatcher是brpc对epoll(Linux)或kqueue(macOS)的封装，采用边缘触发(EPOLLET)模式。
+
+```mermaid
+graph TD
+    subgraph EventDispatcher核心结构
+        A[EventDispatcher] -->|持有| B[_event_dispatcher_fd<br>epoll实例]
+        A -->|持有| C[_wakeup_fds<br>唤醒管道]
+        A -->|持有| D[_thread_attr<br>bthread属性]
+        A -->|运行在| E[_tid<br>bthread ID]
+    end
+
+    subgraph IO事件管理
+        F[IOEventData] -->|封装| G[input_cb<br>输入事件回调]
+        F -->|封装| H[output_cb<br>输出事件回调]
+        F -->|封装| I[user_data<br>用户数据]
+    end
+
+    subgraph 全局Dispatcher数组
+        J[g_edisp数组] -->|索引| K[tag * event_dispatcher_num + index]
+    end
+
+    B -->|epoll_ctl| L[AddConsumer<br>注册EPOLLIN]
+    B -->|epoll_ctl| M[RegisterEvent<br>注册EPOLLOUT]
+    B -->|epoll_ctl| N[UnregisterEvent<br>取消EPOLLOUT]
+```
+
+#### 6.2.2 事件循环核心流程
+
+```cpp
+// event_dispatcher_epoll.cpp - Run()函数核心逻辑
+void EventDispatcher::Run() {
+    while (!_stop) {
+        epoll_event e[32];
+        const int n = epoll_wait(_event_dispatcher_fd, e, ARRAY_SIZE(e), -1);
+        
+        if (_stop) break;
+        if (n < 0) {
+            if (EINTR == errno) continue;
+            break;
+        }
+        
+        // 先处理所有EPOLLIN事件
+        for (int i = 0; i < n; ++i) {
+            if (e[i].events & (EPOLLIN | EPOLLERR | EPOLLHUP)) {
+                CallInputEventCallback(e[i].data.u64, e[i].events, _thread_attr);
+            }
+        }
+        
+        // 再处理所有EPOLLOUT事件
+        for (int i = 0; i < n; ++i) {
+            if (e[i].events & (EPOLLOUT | EPOLLERR | EPOLLHUP)) {
+                CallOutputEventCallback(e[i].data.u64, e[i].events, _thread_attr);
+            }
+        }
+    }
+}
+```
+
+**关键设计点**：
+1. **边缘触发模式**：使用`EPOLLET`，只在状态变化时通知一次，需要一次性读完所有数据
+2. **分离处理读写事件**：先处理所有读事件，再处理所有写事件，避免相互阻塞
+3. **全局Dispatcher数组**：支持多tag和多dispatcher，通过fd哈希分配到不同dispatcher
+4. **唤醒机制**：使用pipe实现优雅退出，向`_wakeup_fds[1]`写入数据触发epoll_wait返回
+
+#### 6.2.3 IOEventData回调机制
+
+```cpp
+// IOEventData封装了用户回调
+class IOEventData {
+    IOEventDataOptions _options;  // 包含input_cb, output_cb, user_data
+    
+    int CallInputEventCallback(uint32_t events, const bthread_attr_t& thread_attr) {
+        return _options.input_cb(_options.user_data, events, thread_attr);
+    }
+    
+    int CallOutputEventCallback(uint32_t events, const bthread_attr_t& thread_attr) {
+        return _options.output_cb(_options.user_data, events, thread_attr);
+    }
+};
+
+// Socket使用IOEvent模板类管理事件
+template <typename T>
+class IOEvent {
+    IOEventDataId _event_data_id;
+    
+    int AddConsumer(int fd) {
+        // 注册EPOLLIN事件，回调指向Socket::OnInputEvent
+        return GetGlobalEventDispatcher(fd, _bthread_tag)
+            .AddConsumer(_event_data_id, fd);
+    }
+    
+    int RegisterEvent(int fd, bool pollin) {
+        // 注册EPOLLOUT事件，回调指向Socket::OnOutputEvent
+        return GetGlobalEventDispatcher(fd, _bthread_tag)
+            .RegisterEvent(_event_data_id, fd, pollin);
+    }
+};
+```
+
+### 6.3 Socket核心机制
+
+#### 6.3.1 Socket对象结构
+
+```mermaid
+graph TD
+    subgraph Socket核心字段
+        A[Socket] -->|文件描述符| B[_fd<br>atomic<int>]
+        A -->|读写缓冲| C[_read_buf<br>butil::IOBuf]
+        A -->|写请求队列| D[_write_head<br>atomic<WriteRequest*>]
+        A -->|事件管理| E[_io_event<br>IOEvent<Socket>]
+        A -->|回调函数| F[_on_edge_triggered_events<br>回调指针]
+        A -->|SSL状态| G[_ssl_state<br>SSLState]
+        A -->|RDMA端点| H[_rdma_ep<br>RdmaEndpoint*]
+    end
+
+    subgraph WriteRequest链表
+        I[WriteRequest] -->|data| J[butil::IOBuf]
+        I -->|next| K[WriteRequest*]
+        I -->|id_wait| L[bthread_id_t]
+        I -->|socket| M[Socket*]
+    end
+
+    D -->|指向| I
+```
+
+#### 6.3.2 Socket生命周期管理
+
+Socket使用版本化引用计数(`VersionedRefWithId`)管理生命周期：
+
+```cpp
+// Socket继承自VersionedRefWithId
+class Socket : public VersionedRefWithId<Socket> {
+    // _versioned_ref的高位是版本号，低位是引用计数
+    // 每次SetFailed()会增加版本号，防止ABA问题
+};
+
+// 通过SocketId访问Socket需要先Address
+SocketUniquePtr s;
+if (Socket::Address(socket_id, &s) == 0) {
+    // 成功获取Socket引用，可以安全访问
+    // SocketUniquePtr析构时自动释放引用
+}
+```
+
+### 6.4 Read流程深度分析
+
+#### 6.4.1 服务端连接建立流程
+
+```mermaid
+sequenceDiagram
+    participant S as Server
+    participant A as Acceptor
+    participant ED as EventDispatcher
+    participant LS as ListenSocket
+    participant CS as ClientSocket
+
+    Note over S,LS: 启动阶段
+    S->>A: AddService() 注册服务
+    S->>LS: socket() + bind() + listen()
+    S->>A: StartAccept(listened_fd)
+    A->>LS: Socket::Create() 创建ListenSocket
+    A->>ED: AddConsumer(listened_fd) 注册EPOLLIN
+    ED->>ED: epoll_ctl(EPOLL_CTL_ADD, EPOLLIN|EPOLLET)
+    
+    Note over S,CS: 连接建立阶段
+    ED->>ED: epoll_wait() 返回EPOLLIN事件
+    ED->>LS: CallInputEventCallback()
+    LS->>A: OnInputEvent() -> OnNewConnections()
+    
+    loop accept直到EAGAIN
+        A->>LS: accept() 获取新连接fd
+        A->>CS: Socket::Create() 创建ClientSocket
+        A->>CS: 设置on_edge_triggered_events=OnNewMessages
+        A->>ED: AddConsumer(client_fd) 注册EPOLLIN
+        ED->>ED: epoll_ctl(EPOLL_CTL_ADD, EPOLLIN|EPOLLET)
+        A->>A: _socket_map.insert(socket_id)
+    end
+```
+
+**核心代码流程**：
+
+```cpp
+// acceptor.cpp - OnNewConnectionsUntilEAGAIN()
+void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
+    while (1) {
+        sockaddr_storage in_addr;
+        socklen_t in_len = sizeof(in_addr);
+        butil::fd_guard in_fd(accept(acception->fd(), (sockaddr*)&in_addr, &in_len));
+        
+        if (in_fd < 0) {
+            if (errno == EAGAIN) return;  // 边缘触发，读完所有连接
+            continue;
+        }
+        
+        // 创建新Socket处理客户端连接
+        SocketOptions options;
+        options.fd = in_fd;
+        options.user = acception->user();  // InputMessenger
+        options.on_edge_triggered_events = InputMessenger::OnNewMessages;
+        
+        SocketId socket_id;
+        Socket::Create(options, &socket_id);
+        in_fd.release();  // 转移所有权给Socket
+        
+        // 加入连接map
+        _socket_map.insert(socket_id, ConnectStatistics());
+    }
+}
+```
+
+#### 6.4.2 数据读取与事件处理流程
+
+```mermaid
+sequenceDiagram
+    participant ED as EventDispatcher
+    participant S as Socket
+    participant IM as InputMessenger
+    participant P as Protocol
+    participant B as bthread
+
+    Note over ED,B: 数据到达触发读事件
+    ED->>ED: epoll_wait() 返回EPOLLIN
+    ED->>S: CallInputEventCallback()
+    S->>S: OnInputEvent()
+    
+    Note over S: 检查_nevent防止重复创建bthread
+    S->>S: _nevent.fetch_add(1)
+    
+    alt _nevent == 0 (首次事件)
+        S->>B: bthread_start_urgent() 创建ProcessEvent bthread
+        B->>S: ProcessEvent()
+        S->>IM: _on_edge_triggered_events() 即OnNewMessages()
+    else _nevent > 0 (已有bthread处理)
+        Note over S: 等待已有bthread处理完
+    end
+    
+    Note over IM,B: 消息读取循环
+    loop 直到read返回EAGAIN或EOF
+        IM->>S: DoRead(size_hint)
+        S->>S: _read_buf.append_from_file_descriptor(fd)
+        IM->>IM: ProcessNewMessage()
+        IM->>P: CutInputMessage() 协议解析
+        
+        alt 解析成功
+            P->>IM: 返回InputMessageBase*
+            IM->>B: bthread_start_background() 创建处理bthread
+            B->>P: process() 处理请求
+        else 数据不完整
+            P->>IM: PARSE_ERROR_NOT_ENOUGH_DATA
+            IM->>IM: 继续读取
+        end
+    end
+```
+
+**核心代码详解**：
+
+```cpp
+// socket.cpp - OnInputEvent()
+int Socket::OnInputEvent(void* user_data, uint32_t events,
+                         const bthread_attr_t& thread_attr) {
+    SocketId id = reinterpret_cast<SocketId>(user_data);
+    SocketUniquePtr s;
+    if (Address(id, &s) < 0) return -1;  // Socket已失效
+    
+    if (s->_on_edge_triggered_events == NULL) return 0;
+    if (s->fd() < 0) return -1;
+    
+    // 使用_nevent计数防止重复创建bthread
+    if (s->_nevent.fetch_add(1, butil::memory_order_acq_rel) == 0) {
+        // 首次事件，创建bthread处理
+        Socket* const p = s.release();  // 转移所有权
+        bthread_start_urgent(&tid, &attr, ProcessEvent, p);
+    }
+    return 0;
+}
+
+// socket.cpp - ProcessEvent()
+void* Socket::ProcessEvent(void* arg) {
+    SocketUniquePtr s(static_cast<Socket*>(arg));
+    s->_on_edge_triggered_events(s.get());  // 调用OnNewMessages
+    return NULL;
+}
+
+// input_messenger.cpp - OnNewMessages()
+void InputMessenger::OnNewMessages(Socket* m) {
+    int progress = Socket::PROGRESS_INIT;
+    bool read_eof = false;
+    
+    while (!read_eof) {
+        // 计算本次读取大小（基于历史消息大小动态调整）
+        size_t once_read = m->_avg_msg_size * 16;
+        
+        // 读取数据到_read_buf
+        const ssize_t nr = m->DoRead(once_read);
+        if (nr <= 0) {
+            if (nr == 0) read_eof = true;  // EOF
+            else if (errno != EAGAIN) { /* 错误处理 */ }
+            else if (!m->MoreReadEvents(&progress)) return;  // 无更多事件
+            else continue;  // 有新事件，继续读
+        }
+        
+        // 处理读取到的消息
+        ProcessNewMessage(m, nr, read_eof, received_us, base_realtime, last_msg);
+    }
+}
+
+// socket.cpp - DoRead()
+ssize_t Socket::DoRead(size_t size_hint) {
+    // SSL检测和处理
+    if (ssl_state() == SSL_UNKNOWN) {
+        _ssl_state = DetectSSLState(fd(), &error_code);
+    }
+    
+    if (ssl_state() == SSL_OFF) {
+        // 直接从fd读取到IOBuf，零拷贝
+        return _read_buf.append_from_file_descriptor(fd(), size_hint);
+    } else {
+        // 从SSL通道读取
+        return _read_buf.append_from_SSL_channel(_ssl_session, &ssl_error, size_hint);
+    }
+}
+```
+
+#### 6.4.3 消息解析与分发
+
+```cpp
+// input_messenger.cpp - ProcessNewMessage()
+int InputMessenger::ProcessNewMessage(Socket* m, ssize_t bytes, ...) {
+    m->AddInputBytes(bytes);
+    
+    while (1) {
+        // 尝试用各种协议解析消息
+        ParseResult pr = CutInputMessage(m, &index, read_eof);
+        
+        if (pr.error() == PARSE_ERROR_NOT_ENOUGH_DATA) {
+            // 数据不完整，等待更多数据
+            break;
+        } else if (!pr.is_ok()) {
+            // 解析错误，关闭连接
+            m->SetFailed(EINVAL, ...);
+            return -1;
+        }
+        
+        // 解析成功，创建bthread处理
+        DestroyingPtr<InputMessageBase> msg(pr.message());
+        
+        // 记录调度开始时间
+        msg->_cut_done_ns = butil::cpuwide_time_ns();
+        
+        // 设置处理函数和参数
+        msg->_process = _handlers[index].process;
+        msg->_arg = _handlers[index].arg;
+        
+        // 创建bthread处理请求
+        bthread_start_background(&tid, &attr, RunClosure, msg.get());
+    }
+}
+```
+
+### 6.5 Write流程深度分析
+
+#### 6.5.1 客户端连接建立流程
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Socket
+    participant ED as EventDispatcher
+    participant SS as ServerSocket
+
+    Note over C,SS: 连接建立阶段
+    C->>S: Channel::Init() -> Socket::Create()
+    S->>S: 设置remote_side
+    Note over S: connect_on_create=false时延迟连接
+    
+    C->>S: Socket::Write() 首次写入
+    S->>S: StartWrite() -> ConnectIfNot()
+    
+    alt fd < 0 (未连接)
+        S->>S: DoConnect()
+        S->>SS: socket() + connect() 非阻塞连接
+        SS-->>S: EINPROGRESS
+        
+        S->>S: 创建EpollOutRequest
+        S->>ED: RegisterEvent() 注册EPOLLOUT
+        S->>S: 等待连接完成
+        
+        ED->>ED: epoll_wait() 返回EPOLLOUT
+        ED->>S: OnOutputEvent()
+        S->>S: HandleEpollOutRequest()
+        S->>S: 连接成功，调用KeepWriteIfConnected()
+    end
+```
+
+**核心代码**：
+
+```cpp
+// socket.cpp - Connect()
+int Socket::Connect(const timespec* abstime, int (*on_connect)(int, int, void*), void* data) {
+    // 创建非阻塞socket
+    butil::fd_guard sockfd(socket(serv_addr.ss_family, SOCK_STREAM, 0));
+    butil::make_non_blocking(sockfd);
+    
+    // 发起非阻塞连接
+    const int rc = ::connect(sockfd, (struct sockaddr*)&serv_addr, addr_size);
+    if (rc != 0 && errno != EINPROGRESS) {
+        return -1;
+    }
+    
+    // 创建EpollOutRequest等待连接完成
+    EpollOutRequest* req = new EpollOutRequest();
+    req->fd = sockfd;
+    req->on_epollout_event = on_connect;
+    req->data = data;
+    
+    // 创建临时Socket管理连接过程
+    SocketId connect_id;
+    Socket::Create(options, &connect_id);
+    
+    // 注册EPOLLOUT事件
+    GetGlobalEventDispatcher(sockfd, tag).RegisterEvent(event_data_id, sockfd, false);
+    
+    return 0;
+}
+```
+
+#### 6.5.2 数据写入流程
+
+```mermaid
+sequenceDiagram
+    participant U as User Code
+    participant S as Socket
+    participant WQ as WriteRequest队列
+    participant KW as KeepWrite bthread
+    participant ED as EventDispatcher
+    participant FD as FileDescriptor
+
+    Note over U,FD: 写入请求
+    U->>S: Write(IOBuf* data)
+    S->>S: 创建WriteRequest
+    S->>WQ: _write_head.exchange(req) 原子入队
+    
+    alt prev_head == NULL (无竞争)
+        Note over S: 获得写权限
+        S->>S: ConnectIfNot() 确保已连接
+        S->>FD: cut_into_file_descriptor() 尝试直接写入
+        
+        alt 写入完成
+            S->>S: ReturnSuccessfulWriteRequest()
+        else 写入未完成或EAGAIN
+            S->>KW: bthread_start_background() 创建KeepWrite
+        end
+        
+    else prev_head != NULL (有竞争)
+        Note over S: 其他线程正在写，入队等待
+        S->>WQ: req->next = prev_head
+    end
+    
+    Note over KW,FD: KeepWrite循环
+    loop 直到所有数据写完
+        KW->>WQ: IsWriteComplete() 检查是否完成
+        KW->>KW: DoWrite() 批量写入
+        KW->>FD: cut_multiple_into_file_descriptor()
+        
+        alt nw <= 0 (缓冲区满)
+            KW->>ED: WaitEpollOut() 等待EPOLLOUT
+            ED->>KW: EPOLLOUT事件到达
+        else 写入成功
+            KW->>KW: AddOutputBytes(nw)
+        end
+        
+        KW->>KW: 返回成功的WriteRequest
+    end
+```
+
+**核心代码详解**：
+
+```cpp
+// socket.cpp - Write()
+int Socket::Write(butil::IOBuf* data, const WriteOptions* options_in) {
+    // 创建WriteRequest
+    WriteRequest* req = butil::get_object<WriteRequest>();
+    req->data.swap(*data);
+    req->next = WriteRequest::UNCONNECTED;
+    
+    return StartWrite(req, opt);
+}
+
+// socket.cpp - StartWrite()
+int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
+    // 原子操作获取写权限
+    WriteRequest* const prev_head = _write_head.exchange(req, butil::memory_order_release);
+    
+    if (prev_head != NULL) {
+        // 有其他线程正在写，加入队列等待
+        req->next = prev_head;
+        return 0;
+    }
+    
+    // 获得写权限
+    req->next = NULL;
+    
+    // 确保已连接
+    ret = ConnectIfNot(opt.abstime, req);
+    if (ret < 0) { /* 连接失败 */ }
+    if (ret == 1) { /* 正在连接，回调会继续 */ return 0; }
+    
+    // 尝试直接写入一次
+    if (_conn) {
+        nw = _conn->CutMessageIntoFileDescriptor(fd(), data_arr, 1);
+    } else {
+        nw = req->data.cut_into_file_descriptor(fd());
+    }
+    
+    if (IsWriteComplete(req, true, NULL)) {
+        // 写入完成
+        ReturnSuccessfulWriteRequest(req);
+        return 0;
+    }
+    
+    // 未写完，创建KeepWrite bthread继续写
+    bthread_start_background(&th, &BTHREAD_ATTR_NORMAL, KeepWrite, req);
+    return 0;
+}
+
+// socket.cpp - KeepWrite()
+void* Socket::KeepWrite(void* void_arg) {
+    WriteRequest* req = static_cast<WriteRequest*>(void_arg);
+    SocketUniquePtr s(req->get_socket());
+    
+    WriteRequest* cur_tail = NULL;
+    do {
+        // 跳过已写完的请求
+        if (req->next != NULL && req->data.empty()) {
+            WriteRequest* saved_req = req;
+            req = req->next;
+            s->ReturnSuccessfulWriteRequest(saved_req);
+        }
+        
+        // 批量写入
+        const ssize_t nw = s->DoWrite(req);
+        if (nw < 0) {
+            if (errno != EAGAIN && errno != EOVERCROWDED) {
+                s->SetFailed(errno, ...);
+                break;
+            }
+        } else {
+            s->AddOutputBytes(nw);
+        }
+        
+        // 释放已写完的请求
+        while (req->next != NULL && req->data.empty()) {
+            WriteRequest* saved_req = req;
+            req = req->next;
+            s->ReturnSuccessfulWriteRequest(saved_req);
+        }
+        
+        // 如果缓冲区满，等待EPOLLOUT
+        if (nw <= 0) {
+            const timespec duetime = butil::milliseconds_from_now(WAIT_EPOLLOUT_TIMEOUT_MS);
+            bool pollin = (s->_on_edge_triggered_events != NULL);
+            s->WaitEpollOut(s->fd(), pollin, &duetime);
+        }
+        
+        // 检查是否所有请求都写完
+        if (s->IsWriteComplete(cur_tail, false, &cur_tail)) {
+            break;
+        }
+    } while (true);
+    
+    return NULL;
+}
+
+// socket.cpp - DoWrite()
+ssize_t Socket::DoWrite(WriteRequest* req) {
+    // 将多个IOBuf组织成数组
+    butil::IOBuf* data_list[DATA_LIST_MAX];
+    size_t ndata = 0;
+    for (WriteRequest* p = req; p != NULL && ndata < DATA_LIST_MAX; p = p->next) {
+        data_list[ndata++] = &p->data;
+    }
+    
+    if (ssl_state() == SSL_OFF) {
+        // 批量写入多个IOBuf到fd，零拷贝
+        return butil::IOBuf::cut_multiple_into_file_descriptor(fd(), data_list, ndata);
+    } else {
+        // 写入SSL通道
+        return butil::IOBuf::cut_multiple_into_SSL_channel(_ssl_session, data_list, ndata, &ssl_error);
+    }
+}
+```
+
+#### 6.5.3 WaitEpollOut机制
+
+```cpp
+// socket.cpp - WaitEpollOut()
+int Socket::WaitEpollOut(int fd, bool pollin, const timespec* abstime) {
+    const int expected_val = _epollout_butex->load(butil::memory_order_relaxed);
+    
+    // 注册EPOLLOUT事件
+    if (_io_event.RegisterEvent(fd, pollin) != 0) {
+        return -1;
+    }
+    
+    // 等待EPOLLOUT事件或超时
+    if (bthread::butex_wait(_epollout_butex, expected_val, abstime) < 0) {
+        if (errno != EAGAIN && errno != ETIMEDOUT) {
+            return -1;
+        }
+    }
+    
+    return 0;
+}
+
+// socket.cpp - OnOutputEvent()
+int Socket::OnOutputEvent(void* user_data, uint32_t, const bthread_attr_t&) {
+    SocketId id = reinterpret_cast<SocketId>(user_data);
+    SocketUniquePtr s;
+    if (Socket::AddressFailedAsWell(id, &s) < 0) return -1;
+    
+    // 唤醒等待EPOLLOUT的bthread
+    s->_epollout_butex->fetch_add(1, butil::memory_order_relaxed);
+    bthread::butex_wake_except(s->_epollout_butex, 0);
+    
+    return 0;
+}
+```
+
+### 6.6 零拷贝机制详解
+
+#### 6.6.1 butil::IOBuf设计
+
+```mermaid
+graph TD
+    subgraph IOBuf结构
+        A[IOBuf] -->|持有| B[BlockRef链表]
+        B -->|指向| C[Block]
+        C -->|持有| D[Data内存<br>引用计数]
+        C -->|持有| E[下一个Block]
+    end
+
+    subgraph 零拷贝操作
+        F[append(IOBuf&)] -->|只复制BlockRef指针| G[共享Data内存]
+        H[cut(IOBuf*)] -->|只移动BlockRef| I[转移所有权]
+        J[append_from_file_descriptor] -->|直接读入Block| K[避免中间缓冲]
+        L[cut_into_file_descriptor] -->|直接从Block写| M[避免内存拷贝]
+    end
+```
+
+#### 6.6.2 IOBuf在IO路径中的应用
+
+```cpp
+// 读取路径：直接从fd读入IOBuf
+ssize_t Socket::DoRead(size_t size_hint) {
+    // IOBuf::append_from_file_descriptor内部：
+    // 1. 分配Block内存
+    // 2. 直接readv()到Block
+    // 3. 将Block加入IOBuf链表
+    // 整个过程只有一次内存拷贝（从内核到用户态）
+    return _read_buf.append_from_file_descriptor(fd(), size_hint);
+}
+
+// 写入路径：直接从IOBuf写入fd
+ssize_t Socket::DoWrite(WriteRequest* req) {
+    butil::IOBuf* data_list[DATA_LIST_MAX];
+    size_t ndata = 0;
+    for (WriteRequest* p = req; p != NULL; p = p->next) {
+        data_list[ndata++] = &p->data;
+    }
+    
+    // IOBuf::cut_multiple_into_file_descriptor内部：
+    // 1. 遍历所有IOBuf的BlockRef
+    // 2. 构造iovec数组
+    // 3. 调用writev()批量写入
+    // 整个过程只有一次内存拷贝（从用户态到内核）
+    return butil::IOBuf::cut_multiple_into_file_descriptor(fd(), data_list, ndata);
+}
+```
+
+**零拷贝优势**：
+1. **减少内存拷贝**：数据直接在内核缓冲区和IOBuf Block之间传输
+2. **支持scatter-gather I/O**：使用writev/readv批量读写多个非连续内存块
+3. **内存共享**：append(IOBuf&)只复制指针，多个IOBuf共享同一块数据
+4. **引用计数**：Block使用引用计数，自动管理生命周期
+
+### 6.7 端到端完整流程图
+
+#### 6.7.1 服务端完整收发流程
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant ED as EventDispatcher
+    participant A as Acceptor
+    participant S as Socket
+    participant IM as InputMessenger
+    participant P as Protocol
+    participant SVC as Service
+    participant WQ as WriteRequest队列
+    participant KW as KeepWrite
+
+    Note over C,KW: 连接建立
+    C->>ED: TCP SYN
+    ED->>A: EPOLLIN on listen_fd
+    A->>A: OnNewConnections()
+    A->>S: accept() + Socket::Create()
+    A->>ED: AddConsumer(client_fd)
+    
+    Note over C,KW: 请求接收
+    C->>S: 发送请求数据
+    ED->>S: EPOLLIN事件
+    S->>S: OnInputEvent()
+    S->>IM: OnNewMessages()
+    IM->>S: DoRead() -> readv()
+    IM->>P: CutInputMessage() 解析
+    P->>IM: InputMessageBase*
+    IM->>IM: bthread_start_background()
+    IM->>SVC: process_request()
+    
+    Note over C,KW: 业务处理
+    SVC->>SVC: 执行业务逻辑
+    SVC->>P: 序列化响应
+    
+    Note over C,KW: 响应发送
+    SVC->>S: Write(response)
+    S->>WQ: WriteRequest入队
+    S->>KW: KeepWrite bthread
+    KW->>S: DoWrite() -> writev()
+    S->>C: 发送响应数据
+    
+    alt 缓冲区满
+        KW->>ED: WaitEpollOut()
+        ED->>KW: EPOLLOUT事件
+        KW->>S: 继续写入
+    end
+```
+
+#### 6.7.2 客户端完整收发流程
+
+```mermaid
+sequenceDiagram
+    participant U as User Code
+    participant CH as Channel
+    participant S as Socket
+    participant ED as EventDispatcher
+    participant WQ as WriteRequest队列
+    participant KW as KeepWrite
+    participant SVR as Server
+
+    Note over U,SVR: 连接建立
+    U->>CH: Channel::Init()
+    CH->>S: Socket::Create()
+    
+    Note over U,SVR: 请求发送
+    U->>CH: CallMethod()
+    CH->>S: Write(request)
+    S->>S: ConnectIfNot()
+    S->>SVR: connect() 非阻塞
+    S->>ED: RegisterEvent(EPOLLOUT)
+    ED->>S: OnOutputEvent()
+    S->>WQ: WriteRequest入队
+    S->>KW: KeepWrite bthread
+    KW->>S: DoWrite() -> writev()
+    S->>SVR: 发送请求数据
+    
+    Note over U,SVR: 响应接收
+    SVR->>S: 发送响应数据
+    ED->>S: EPOLLIN事件
+    S->>S: OnInputEvent()
+    S->>CH: OnNewMessages()
+    CH->>S: DoRead() -> readv()
+    CH->>CH: 解析响应
+    CH->>U: 触发回调Closure
+```
+
+### 6.8 模块关系总览图
+
+```mermaid
+graph TD
+    subgraph 应用层
+        A1[Server]
+        A2[Channel]
+        A3[Service]
+    end
+
+    subgraph RPC核心层
+        B1[Acceptor<br>连接接受]
+        B2[InputMessenger<br>消息处理]
+        B3[Protocol<br>协议解析]
+        B4[Controller<br>请求上下文]
+    end
+
+    subgraph IO抽象层
+        C1[Socket<br>文件描述符抽象]
+        C2[WriteRequest<br>写请求队列]
+        C3[IOBuf<br>零拷贝缓冲区]
+    end
+
+    subgraph 事件驱动层
+        D1[EventDispatcher<br>epoll封装]
+        D2[IOEventData<br>事件回调封装]
+        D3[IOEvent<br>事件管理模板]
+    end
+
+    subgraph 协程调度层
+        E1[bthread<br>协程调度]
+        E2[butex<br>协程同步原语]
+    end
+
+    subgraph 系统调用层
+        F1[socket/bind/listen/accept]
+        F2[connect]
+        F3[readv/writev]
+        F4[epoll_ctl/epoll_wait]
+    end
+
+    A1 --> B1
+    A2 --> C1
+    A3 --> B4
+    
+    B1 --> C1
+    B2 --> C1
+    B2 --> B3
+    B4 --> C1
+    
+    C1 --> C2
+    C1 --> C3
+    C2 --> C3
+    
+    C1 --> D3
+    D3 --> D2
+    D2 --> D1
+    
+    D1 --> E1
+    D1 --> E2
+    C2 --> E1
+    
+    D1 --> F4
+    B1 --> F1
+    C1 --> F2
+    C1 --> F3
+```
+
+### 6.9 关键设计总结
+
+#### 6.9.1 事件驱动模型
+- **边缘触发**：使用EPOLLET，只在状态变化时通知，减少系统调用
+- **非阻塞IO**：所有socket都是非阻塞，避免IO线程被阻塞
+- **事件分离**：先处理所有读事件，再处理所有写事件，避免相互影响
+
+#### 6.9.2 并发写入机制
+- **无锁队列**：使用原子操作exchange实现无锁写入队列
+- **写权限竞争**：第一个获取写权限的线程负责写入，其他线程入队等待
+- **KeepWrite线程**：负责批量写入，减少线程切换开销
+- **EPOLLOUT等待**：缓冲区满时等待EPOLLOUT事件，避免忙等待
+
+#### 6.9.3 零拷贝优化
+- **IOBuf设计**：非连续内存缓冲区，支持scatter-gather I/O
+- **直接IO**：数据直接在内核缓冲区和IOBuf之间传输
+- **内存共享**：多个IOBuf可以共享同一块数据，避免拷贝
+
+#### 6.9.4 协程集成
+- **IO线程与Worker分离**：EventDispatcher运行在独立bthread，不阻塞Worker线程
+- **请求处理协程化**：每个请求在独立bthread中处理，支持高并发
+- **协程同步**：使用butex实现协程级别的等待，不阻塞Worker线程
+
+#### 6.9.5 连接管理
+- **版本化引用计数**：Socket使用版本号防止ABA问题
+- **延迟连接**：客户端首次写入时才建立连接
+- **健康检查**：支持连接健康检查和自动重连
+- **空闲连接管理**：自动关闭空闲超时的连接
