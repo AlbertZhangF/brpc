@@ -208,6 +208,74 @@ Phase 20
 - [ ] 提交修改
 - **Status:** completed
 
+### Phase 22: brpc框架整体模块分析
+- [x] 梳理brpc核心模块（butil、bthread、bvar、brpc核心、协议层、传输层）的职责边界
+- [x] 分析各模块之间的依赖关系和交互接口
+- [x] 绘制brpc整体模块交互图
+- [x] 将分析结果记录到findings.md
+- **Status:** completed
+
+### Phase 23: rdma_performance示例端到端工作流梳理
+- [x] 从client启动、请求发送、网络传输、服务端接收、bthread调度、请求处理、响应返回的全流程跟踪
+- [x] 梳理每个流程节点涉及的代码文件和关键函数
+- [x] 标记出rdma传输路径与普通TCP路径的差异点
+- [x] 绘制完整的端到端工作流时序图
+- [x] 将分析结果记录到findings.md
+- **Status:** completed
+
+### Phase 24: 生成详细的分析文档
+- [x] 编写brpc框架架构分析文档，包含模块交互图
+- [x] 编写rdma_performance工作流分析文档，包含完整流程图
+- [x] 整合为一份完整的md文件`brpc_architecture_and_workflow.md`
+- **Status:** completed
+
+### Phase 25: 文档审核与优化
+- [x] 文档内容审查，确保准确性和完整性
+- [x] 优化图表和内容表述
+- [x] 最终交付完整文档`brpc_architecture_and_workflow.md`
+- **Status:** completed
+
+### Phase 26: 文档内容优化修改
+- [x] 将rdma_performance时序流程图修改为TCP模式（RDMA=False）的流程，替换RDMA相关传输逻辑为TCP socket/epoll流程
+- [x] 完善brpc模块交互关系图，增加了详细的交互逻辑、函数接口调用、支持的协议类型和传输方式
+- [x] 在所有流程说明中补充了函数接口名称、输入输出参数、返回值等细节
+- [x] 验证修改后文档的准确性和可读性
+- **Status:** completed
+
+### Phase 27: 补充bthread相关详细内容
+- [x] 在模块交互关系章节补充bthread核心接口说明，覆盖任务创建、调度控制、同步原语、本地存储、调度统计五大类共20+个接口，包含功能说明和使用场景
+- [x] 新增单独大章节（第5章）介绍bthread任务从创建、入队、调度、执行到销毁的完整生命周期
+- [x] 绘制bthread生命周期时序图，包含完整的函数调用流程、数据流向和时间戳打点
+- [x] 补充各阶段详细代码流程和关键耗时指标计算说明
+- [x] 验证内容准确性，和bthread源码实现完全一致
+- **Status:** completed
+
+### Phase 28: 文档细节优化与问题修正
+- [x] 完善1.2模块交互关系图，补充了Server/Channel/Protocol/Socket/bvar/butil等各模块的核心接口
+- [x] 补充了各核心接口的功能说明，清晰展示接口用途
+- [x] 修正TCP模式时序图：补充了客户端初始化阶段启动发送线程的bthread_start_background调用
+- [x] 新增bthread调用说明小节，解释了客户端压测阶段不需要重复创建bthread的原因，明确了服务端每次请求都会创建bthread的逻辑
+- [x] 验证所有接口和流程与brpc源码完全一致
+- **Status:** completed
+
+### Phase 29: 细化模块交互关系到对象层面
+- [x] 重新设计1.2模块交互图，以对象为单元梳理调用关系，拆分服务端对象组、客户端对象组、传输层对象组
+- [x] 明确每个核心对象的职责和对外接口，整理为对象职责说明表
+- [x] 梳理服务端和客户端的对象调用流程，从业务代码到网络传输的全链路对象调用清晰可见
+- [x] 补充跨层对象依赖说明，明确基础工具对象的使用场景
+- [x] 验证所有对象关系和调用流程与brpc源码完全一致
+- **Status:** completed
+
+### Phase 30: 新增模块级关系图
+- [x] 新增独立的模块级关系图，展示了从业务应用层到基础工具层的完整分层调用关系
+- [x] 每个模块都标注了核心作用和最重要的操作函数，清晰展示模块能力
+- [x] 与现有对象级图形成互补，兼顾宏观架构理解和微观对象调用
+- [x] 补充了模块级视图说明，解释了两种视图的适用场景和互补关系
+- **Status:** completed
+
+## Current Phase
+All phases completed
+
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
