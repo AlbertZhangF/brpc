@@ -1,95 +1,57 @@
-# Progress Log
+# 工作进度日志
 
-## Session: 2026-03-26
+## 2026-03-27 会话记录
 
-### Phase 1: 代码探索与架构理解
-- **Status:** complete
-- **Started:** 2026-03-26
-- Actions taken:
-  - 创建规划文件task_plan.md, findings.md, progress.md
-  - 读取CLAUDE.md了解项目结构
-  - 读取brpc_architecture_and_workflow.md了解已有分析内容
-  - 探索EventDispatcher、Socket、InputMessenger、Acceptor核心代码
-  - 分析epoll事件循环机制、IOEventData回调机制
-  - 理解WriteRequest队列、KeepWrite线程机制
-- Files created/modified:
-  - task_plan.md (created)
-  - findings.md (created)
-  - progress.md (created)
+### 任务开始
+- 时间: 2026-03-27
+- 目标: 分析brpc客户端bthread工作机制，补充文档
 
-### Phase 2: Read流程深度分析
-- **Status:** complete
-- Actions taken:
-  - 分析Acceptor连接建立流程
-  - 分析Socket::OnInputEvent事件处理
-  - 分析InputMessenger::OnNewMessages消息读取
-  - 分析Socket::DoRead零拷贝读取
-  - 分析ProcessNewMessage消息解析分发
-- Files created/modified:
-  - findings.md (updated)
+### 已完成工作
+1. ✓ 创建任务计划文件
+2. ✓ 创建研究发现文件
+3. ✓ 读取CLAUDE.md和brpc_architecture_and_workflow.md
+4. ✓ 了解项目结构和背景
+5. ✓ 分析rdma_performance示例代码（client.cpp和server.cpp）
+6. ✓ 分析bthread创建和销毁机制（task_group.cpp, input_messenger.cpp）
+7. ✓ 更新brpc_architecture_and_workflow.md文档
+8. ✓ 验证文档准确性和完整性
 
-### Phase 3: Write流程深度分析
-- **Status:** complete
-- Actions taken:
-  - 分析客户端连接建立流程(Socket::Connect)
-  - 分析Socket::Write和StartWrite流程
-  - 分析KeepWrite线程机制
-  - 分析WaitEpollOut等待机制
-  - 分析Socket::DoWrite批量写入
-- Files created/modified:
-  - findings.md (updated)
+### 文档更新内容
+在brpc_architecture_and_workflow.md中新增了三个小节：
 
-### Phase 4: 端到端流程整合
-- **Status:** complete
-- Actions taken:
-  - 整合Read和Write流程
-  - 绘制服务端完整收发流程时序图
-  - 绘制客户端完整收发流程时序图
-  - 绘制模块关系总览图
-  - 总结关键设计点
-- Files created/modified:
-  - findings.md (updated)
+**2.2.2 客户端bthread工作机制详解**
+- 发送线程创建与循环机制
+- 回调驱动的循环发送设计
+- bthread结束条件
+- 为什么不需要频繁销毁
 
-### Phase 5: 文档编写与验证
-- **Status:** complete
-- Actions taken:
-  - 编写第6章节完整内容
-  - 添加EventDispatcher事件循环机制
-  - 添加Socket核心机制
-  - 添加Read流程深度分析
-  - 添加Write流程深度分析
-  - 添加零拷贝机制详解
-  - 添加端到端完整流程图
-  - 添加模块关系总览图
-  - 添加关键设计总结
-  - 验证文档完整性
-- Files created/modified:
-  - brpc_architecture_and_workflow.md (updated)
+**2.2.3 服务端bthread销毁机制详解**
+- bthread创建位置
+- 完整的销毁流程代码分析（task_runner函数）
+- 资源复用机制（TaskMeta池、栈内存池）
+- 为什么需要为每个请求创建独立bthread
 
-## Test Results
-| Test | Input | Expected | Actual | Status |
-|------|-------|----------|--------|--------|
-| 文档完整性检查 | 查看第6章节 | 包含所有必要内容 | 包含6.1-6.9所有小节 | ✓ |
-| 时序图检查 | 查看mermaid图 | 正确显示流程 | 6个时序图正确 | ✓ |
-| 模块关系图检查 | 查看mermaid图 | 正确显示关系 | 4个模块关系图正确 | ✓ |
-| 代码片段检查 | 查看代码示例 | 关键代码完整 | 核心代码片段完整 | ✓ |
-| Test | Input | Expected | Actual | Status |
-|------|-------|----------|--------|--------|
-|      |       |          |        |        |
+**2.2.4 客户端与服务端bthread生命周期对比总结**
+- 详细的对比表格（创建时机、生命周期、工作模式等）
+- 核心差异总结
 
-## Error Log
-| Timestamp | Error | Attempt | Resolution |
-|-----------|-------|---------|------------|
-|           |       | 1       |            |
+### 关键发现
+1. **客户端发送线程**：采用回调驱动模式，一个bthread处理多个请求，避免了频繁创建销毁的开销
+2. **服务端处理线程**：采用"一请求一bthread"模式，保证请求隔离性和公平调度
+3. **bthread销毁机制**：通过task_runner函数中的_release_last_context回调实现，资源归还到对象池复用
+4. **生命周期差异根源**：客户端是长期任务，服务端是短期任务
 
-## 5-Question Reboot Check
-| Question | Answer |
-|----------|--------|
-| Where am I? | 所有Phase已完成 |
-| Where am I going? | 任务已完成 |
-| What's the goal? | 深入分析brpc底层IO与Socket交互，补充文档 - 已完成 |
-| What have I learned? | 见findings.md |
-| What have I done? | 完成第6章节编写，包含9个小节、6个时序图、4个模块关系图 |
+### 会话统计
+- 工具调用次数: 15
+- 文件读取: 8
+- 文件写入: 6
+- 代码分析: client.cpp, server.cpp, task_group.cpp, input_messenger.cpp, bthread.cpp
+- 文档更新: brpc_architecture_and_workflow.md（新增约200行）
 
----
-*Update after completing each phase or encountering errors*
+### 任务状态
+✓ **任务已完成**
+
+所有阶段均已完成：
+- Phase 1: 代码调研与分析 ✓
+- Phase 2: 文档补充与更新 ✓
+- Phase 3: 验证与完善 ✓
