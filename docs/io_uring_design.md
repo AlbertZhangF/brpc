@@ -288,7 +288,7 @@ Socket -down-> BaseDispatcher
 
 BaseDispatcher -down-> EpollDisp
 BaseDispatcher -down-> KqueueDisp
-BaseDispatcher -down-> IoURingDisp
+BaseDispatcher -down-> IoUringDisp
 
 EpollDisp -down-> EpollAPI
 KqueueDisp -down-> KqueueAPI
