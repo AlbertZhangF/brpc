@@ -48,37 +48,31 @@ io_uring是Linux 5.1+引入的高性能异步I/O框架，其核心设计基于**
 
 #### 2.1.1 架构图
 
-```mermaid
-graph TB
-    subgraph UserSpace["用户空间 (User Space)"]
-        App["应用程序 (Application)"]
-        SharedMem["共享内存 (Shared Memory)"]
-        
-        subgraph SharedMem
-            SQ["提交队列 (SQ)<br/>SQE SQE SQE<br/>Head → Tail"]
-            CQ["完成队列 (CQ)<br/>CQE CQE CQE<br/>Head → Tail"]
-        end
-        
-        App -->|"1. 准备SQE"| SharedMem
-        SharedMem -->|"4. 获取CQE"| App
-    end
+```plantuml
+@startuml
+skinparam componentStyle rectangle
+
+package "用户空间 (User Space)" {
+    component "应用程序\n(Application)" as App
     
-    subgraph KernelSpace["内核空间 (Kernel Space)"]
-        IoUringCore["io_uring 核心模块<br/>- 从SQ读取请求<br/>- 异步执行I/O操作<br/>- 将结果写入CQ"]
-        Drivers["设备驱动 / 文件系统<br/>- 网络设备 (NIC)<br/>- 块设备 (SSD/HDD)<br/>- 文件系统"]
-    end
-    
-    SharedMem -->|"2. 提交请求<br/>io_uring_enter()"| IoUringCore
-    IoUringCore -->|"3. 完成通知"| SharedMem
-    IoUringCore --> Drivers
-    
-    style UserSpace fill:#e1f5ff
-    style KernelSpace fill:#fff4e1
-    style App fill:#b3d9ff
-    style SQ fill:#c8e6c9
-    style CQ fill:#ffcdd2
-    style IoUringCore fill:#ffe0b2
-    style Drivers fill:#f8bbd0
+    package "共享内存 (Shared Memory)" {
+        component "提交队列 (SQ)\nSQE SQE SQE\nHead → Tail" as SQ
+        component "完成队列 (CQ)\nCQE CQE CQE\nHead → Tail" as CQ
+    }
+}
+
+package "内核空间 (Kernel Space)" {
+    component "io_uring 核心模块\n- 从SQ读取请求\n- 异步执行I/O操作\n- 将结果写入CQ" as IoUringCore
+    component "设备驱动 / 文件系统\n- 网络设备 (NIC)\n- 块设备 (SSD/HDD)\n- 文件系统" as Drivers
+}
+
+App -down-> SQ : 1. 准备SQE
+SQ -down-> IoUringCore : 2. 提交请求
+IoUringCore -down-> Drivers : 处理I/O
+IoUringCore -up-> CQ : 3. 完成通知
+CQ -up-> App : 4. 获取CQE
+
+@enduml
 ```
 
 #### 2.1.2 工作流程
@@ -263,46 +257,44 @@ sequenceDiagram
 
 #### 3.1.1 架构关系图
 
-```mermaid
-graph TB
-    subgraph AppLayer["brpc 应用层"]
-        Server[Server]
-        Channel[Channel]
-        Socket[Socket]
-        Controller[Controller]
-    end
+```plantuml
+@startuml
+skinparam componentStyle rectangle
+
+package "brpc 应用层" {
+    [Server] as Server
+    [Channel] as Channel
+    [Socket] as Socket
+    [Controller] as Controller
+}
+
+package "EventDispatcher 抽象层" {
+    component "EventDispatcher (基类)\n+ Start()\n+ AddConsumer()\n+ RemoveConsumer()\n+ RegisterEvent()\n+ UnregisterEvent()\n+ Run() [纯虚函数]" as BaseDispatcher
     
-    subgraph DispatcherLayer["EventDispatcher 抽象层"]
-        BaseDispatcher["EventDispatcher (基类)<br/>+ Start()<br/>+ AddConsumer()<br/>+ RemoveConsumer()<br/>+ RegisterEvent()<br/>+ UnregisterEvent()<br/>+ Run() [纯虚函数]"]
-        
-        EpollDisp["EpollDispatcher<br/>(Linux)"]
-        KqueueDisp["KqueueDispatcher<br/>(macOS)"]
-        IoUringDisp["IoUringDispatcher<br/>(Linux)"]
-    end
-    
-    subgraph SyscallLayer["系统调用层"]
-        EpollAPI["epoll API<br/>epoll_create<br/>epoll_ctl<br/>epoll_wait"]
-        KqueueAPI["kqueue API<br/>kqueue()<br/>kevent()"]
-        IoUringAPI["io_uring API<br/>io_uring_setup<br/>io_uring_enter<br/>io_uring_register"]
-    end
-    
-    Server --> BaseDispatcher
-    Channel --> BaseDispatcher
-    Socket --> BaseDispatcher
-    
-    BaseDispatcher --> EpollDisp
-    BaseDispatcher --> KqueueDisp
-    BaseDispatcher --> IoUringDisp
-    
-    EpollDisp --> EpollAPI
-    KqueueDisp --> KqueueAPI
-    IoUringDisp --> IoUringAPI
-    
-    style AppLayer fill:#e3f2fd
-    style DispatcherLayer fill:#f3e5f5
-    style SyscallLayer fill:#fff3e0
-    style BaseDispatcher fill:#c5cae9
-    style IoUringDisp fill:#a5d6a7
+    component "EpollDispatcher\n(Linux)" as EpollDisp
+    component "KqueueDispatcher\n(macOS)" as KqueueDisp
+    component "IoUringDispatcher\n(Linux)" as IoUringDisp
+}
+
+package "系统调用层" {
+    component "epoll API\nepoll_create\nepoll_ctl\nepoll_wait" as EpollAPI
+    component "kqueue API\nkqueue()\nkevent()" as KqueueAPI
+    component "io_uring API\nio_uring_setup\nio_uring_enter\nio_uring_register" as IoUringAPI
+}
+
+Server -down-> BaseDispatcher
+Channel -down-> BaseDispatcher
+Socket -down-> BaseDispatcher
+
+BaseDispatcher -down-> EpollDisp
+BaseDispatcher -down-> KqueueDisp
+BaseDispatcher -down-> IoURingDisp
+
+EpollDisp -down-> EpollAPI
+KqueueDisp -down-> KqueueAPI
+IoUringDisp -down-> IoUringAPI
+
+@enduml
 ```
 
 #### 3.1.2 模块交互图
