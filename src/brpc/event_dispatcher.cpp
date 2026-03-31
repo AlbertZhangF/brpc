@@ -36,6 +36,9 @@ DEFINE_bool(usercode_in_pthread, false,
 DEFINE_bool(usercode_in_coroutine, false,
             "User's callback are run in coroutine, no bthread or pthread blocking call");
 
+DEFINE_string(io_backend, "auto", 
+              "I/O backend: auto, epoll, io_uring. Only works when BRPC_WITH_IO_URING is enabled");
+
 static EventDispatcher* g_edisp = NULL;
 static bvar::LatencyRecorder* g_edisp_read_lantency = NULL;
 static bvar::LatencyRecorder* g_edisp_write_lantency = NULL;
@@ -65,8 +68,6 @@ void InitializeGlobalDispatchers() {
             CHECK_EQ(0, g_edisp[i * FLAGS_event_dispatcher_num + j].Start(&attr));
         }
     }
-    // This atexit is will be run before g_task_control.stop() because above
-    // Start() initializes g_task_control by creating bthread (to run epoll/kqueue).
     CHECK_EQ(0, atexit(StopAndJoinGlobalDispatchers));
 }
 
@@ -100,7 +101,11 @@ void IOEventData::BeforeRecycled() {
 } // namespace brpc
 
 #if defined(OS_LINUX)
-    #include "brpc/event_dispatcher_epoll.cpp"
+    #ifdef BRPC_WITH_IO_URING
+        #include "brpc/event_dispatcher_iouring.cpp"
+    #else
+        #include "brpc/event_dispatcher_epoll.cpp"
+    #endif
 #elif defined(OS_MACOSX)
     #include "brpc/event_dispatcher_kqueue.cpp"
 #else
