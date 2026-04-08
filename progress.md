@@ -93,7 +93,47 @@
 
 **综合评分**: 70%
 
-## Phase 12: 修复P0问题完成
+## 2026-04-08: EPOLL/IOURING与BTHREAD交互关系深度分析
+
+### Phase 16-18: 完成
+
+**工作内容**:
+
+1. **EPOLL与BTHREAD交互分析**:
+   - 分析epoll是否运行在独立的bthread中 → 是
+   - 确定bthread创建策略 → 单bthread持续运行，使用BTHREAD_NEVER_QUIT | BTHREAD_GLOBAL_PRIORITY
+   - 梳理事件循环与bthread调度交互流程
+   - 分析高并发场景下的性能表现
+
+2. **IOURING与BTHREAD交互分析**:
+   - 分析io_uring初始化与工作模式
+   - 确定采用专用bthread进行持续监听 → 是
+   - 分析请求处理机制 → RearmFd机制解决POLL_ADD一次性问题
+   - 梳理交互细节
+
+3. **对比分析**:
+   - 设计差异汇总表
+   - 适用场景对比
+   - 性能对比
+
+4. **文档生成**:
+   - 创建EPOLL_IOURING_BTHREAD_ANALYSIS.md
+   - 包含3个PlantUML类图
+   - 包含3个PlantUML时序图
+   - 添加详细的代码引用
+
+**核心发现**:
+
+| 特性 | epoll | io_uring |
+|------|-------|----------|
+| 独立bthread运行 | ✅ 是 | ✅ 是 |
+| bthread创建策略 | 单bthread持续运行 | 单bthread持续运行 |
+| 事件注册 | EPOLL_CTL_ADD | io_uring_prep_poll_add |
+| 事件持续性 | 持续有效 | 一次性需rearm |
+| 系统调用 | 每次事件一次 | 可批量提交 |
+
+**生成的文档**:
+- EPOLL_IOURING_BTHREAD_ANALYSIS.md - 完整分析报告
 
 ### 修复内容
 

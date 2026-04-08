@@ -117,12 +117,42 @@
 - 性能测试方法
 
 ### Phase 15: 代码检视
-**状态**: 🔄 in_progress
+**状态**: ✅ completed
 **目标**: 使用工具进行代码检视
 **步骤**:
-- 🔄 修复发现的问题
-- ⏳ 代码检视工具检查
-- ⏳ 修复剩余问题
+- ✅ 修复发现的问题
+- ✅ 代码检视工具检查
+- ✅ 修复剩余问题
+
+## 新任务：EPOLL/IOURING与BTHREAD交互关系深度分析
+
+### Phase 16: EPOLL与BTHREAD交互关系分析
+**状态**: ✅ completed
+**目标**: 深入分析BRPC框架中epoll机制的实现架构
+**步骤**:
+- ✅ 分析epoll是否运行在独立的bthread中
+- ✅ 确定epoll工作过程中bthread的创建策略
+- ✅ 梳理epoll事件循环与bthread调度的详细交互流程
+- ✅ 分析epoll线程模型在高并发场景下的性能表现
+
+### Phase 17: IOURING与BTHREAD交互关系分析
+**状态**: ✅ completed
+**目标**: 研究BRPC框架中IOuring的初始化与工作模式
+**步骤**:
+- ✅ 研究IOuring的初始化与工作模式
+- ✅ 明确IOuring是否采用专用bthread进行持续监听
+- ✅ 分析请求处理机制（RearmFd机制）
+- ✅ 梳理IOuring与bthread之间的交互细节
+- ✅ 对比IOuring与epoll在bthread交互模式上的设计差异
+
+### Phase 18: 文档生成
+**状态**: ✅ completed
+**目标**: 创建专业的Markdown文档
+**步骤**:
+- ✅ 创建完整的分析文档EPOLL_IOURING_BTHREAD_ANALYSIS.md
+- ✅ 包含PlantUML类图（3个）
+- ✅ 包含PlantUML时序图（3个）
+- ✅ 添加代码引用和详细注释
 
 ## 背景信息
 - brpc当前支持epoll (Linux) 和 kqueue (macOS)
