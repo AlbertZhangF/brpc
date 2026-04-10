@@ -378,7 +378,7 @@ void EventDispatcher::Run() {
         }
         
         struct io_uring_cqe* cqe = NULL;
-        int wait_ret = io_uring_wait_cqe(&ctx.ring, &cqe, NULL);
+        int wait_ret = io_uring_wait_cqe(&ctx.ring, &cqe);
         
         if (wait_ret < 0) {
             if (wait_ret == -EINTR) {
