@@ -66,7 +66,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     endif()
 endif()
 
-set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=1")
+find_library(IOURING_LIB NAMES uring)
+if(NOT IOURING_LIB)
+    set(IOURING_LIB "")
+    set(WITH_IO_URING 0)
+else()
+    set(WITH_IO_URING 1)
+endif()
+
+set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=1 -DBRPC_WITH_IO_URING=${WITH_IO_URING}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O2 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
 
 if(CMAKE_VERSION VERSION_LESS "3.1.3")
@@ -103,6 +111,11 @@ if ((NOT RDMA_INCLUDE_PATH) OR (NOT RDMA_LIB))
     message(FATAL_ERROR "Fail to find ibverbs")
 endif()
 
+find_library(IOURING_LIB NAMES uring)
+if(NOT IOURING_LIB)
+    set(IOURING_LIB "")
+endif()
+
 set(DYNAMIC_LIB
     ${CMAKE_THREAD_LIBS_INIT}
     ${GFLAGS_LIBRARY}
@@ -111,6 +124,7 @@ set(DYNAMIC_LIB
     ${OPENSSL_CRYPTO_LIBRARY}
     ${OPENSSL_SSL_LIBRARY}
     ${THRIFT_LIB}
+    ${IOURING_LIB}
     dl
     )
 

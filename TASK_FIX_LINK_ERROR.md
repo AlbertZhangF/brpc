@@ -75,10 +75,46 @@ if(WITH_IO_URING)
 endif()
 ```
 
+### 修复3: 为rdma_performance example添加liburing支持
+
+**文件**: example/rdma_performance/CMakeLists.txt
+**位置**: 第68-82行
+
+**添加liburing检测**:
+```cmake
+find_library(IOURING_LIB NAMES uring)
+if(NOT IOURING_LIB)
+    set(IOURING_LIB "")
+    set(WITH_IO_URING 0)
+else()
+    set(WITH_IO_URING 1)
+endif()
+```
+
+**添加编译定义**:
+```cmake
+set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=1 -DBRPC_WITH_IO_URING=${WITH_IO_URING}")
+```
+
+**添加到DYNAMIC_LIB**:
+```cmake
+set(DYNAMIC_LIB
+    ...
+    ${IOURING_LIB}
+    dl
+)
+```
+
 ## 决策记录
 
-### 决策1: 分析CMakeLists.txt配置
+### 决策1: 分析主项目CMakeLists.txt配置
 **日期**: 2026-04-08
 **问题**: liburing库链接配置问题
 **分析**: 检查配置发现WITH_IO_URING选项存在，find_library能找到liburing，但brpc-static和brpc-shared库没有链接它
 **决定**: 需要在src/CMakeLists.txt中为brpc-static和brpc-shared添加target_link_libraries
+
+### 决策2: 分析rdma_performance example的CMakeLists.txt配置
+**日期**: 2026-04-08
+**问题**: example/rdma_performance独立编译时找不到liburing
+**分析**: rdma_performance使用独立的CMakeLists.txt，需要自行链接liburing
+**决定**: 需要在example/rdma_performance/CMakeLists.txt中添加liburing检测和链接
