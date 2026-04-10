@@ -390,41 +390,40 @@ void EventDispatcher::Run() {
         
         if (cqe) {
             IOEventDataId event_data_id = cqe->user_data;
-            if (event_data_id != 0) {
-                int32_t res = cqe->res;
-                if (res >= 0) {
-                    uint32_t events = static_cast<uint32_t>(res);
-                    
-                    pthread_mutex_lock(&ctx.fd_map_mutex);
-                    int fd_to_rearm = -1;
-                    IOEventDataId eid_to_rearm = 0;
-                    uint32_t events_to_rearm = 0;
-                    
-                    for (size_t i = 0; i < ctx.fd_info_vec.size(); ++i) {
-                        if (ctx.fd_info_vec[i].event_data_id == event_data_id) {
-                            fd_to_rearm = ctx.fd_info_vec[i].fd;
-                            eid_to_rearm = event_data_id;
-                            events_to_rearm = ctx.fd_info_vec[i].events;
-                            break;
-                        }
+            int32_t res = cqe->res;
+            LOG(INFO) << "CQE received: event_data_id=" << event_data_id << ", res=" << res;
+            if (event_data_id != 0 && res >= 0) {
+                uint32_t events = static_cast<uint32_t>(res);
+
+                pthread_mutex_lock(&ctx.fd_map_mutex);
+                int fd_to_rearm = -1;
+                IOEventDataId eid_to_rearm = 0;
+                uint32_t events_to_rearm = 0;
+
+                for (size_t i = 0; i < ctx.fd_info_vec.size(); ++i) {
+                    if (ctx.fd_info_vec[i].event_data_id == event_data_id) {
+                        fd_to_rearm = ctx.fd_info_vec[i].fd;
+                        eid_to_rearm = event_data_id;
+                        events_to_rearm = ctx.fd_info_vec[i].events;
+                        break;
                     }
-                    pthread_mutex_unlock(&ctx.fd_map_mutex);
-                    
-                    if (events & (POLLIN | POLLERR | POLLHUP)) {
-                        int64_t start_ns = butil::cpuwide_time_ns();
-                        CallInputEventCallback(event_data_id, events, _thread_attr);
-                        (*g_edisp_read_lantency) << (butil::cpuwide_time_ns() - start_ns);
-                    }
-                    
-                    if (events & (POLLOUT | POLLERR | POLLHUP)) {
-                        int64_t start_ns = butil::cpuwide_time_ns();
-                        CallOutputEventCallback(event_data_id, events, _thread_attr);
-                        (*g_edisp_write_lantency) << (butil::cpuwide_time_ns() - start_ns);
-                    }
-                    
-                    if (fd_to_rearm >= 0 && eid_to_rearm != 0) {
-                        RearmFd(ctx, fd_to_rearm, eid_to_rearm, events_to_rearm);
-                    }
+                }
+                pthread_mutex_unlock(&ctx.fd_map_mutex);
+
+                if (events & (POLLIN | POLLERR | POLLHUP)) {
+                    int64_t start_ns = butil::cpuwide_time_ns();
+                    CallInputEventCallback(event_data_id, events, _thread_attr);
+                    (*g_edisp_read_lantency) << (butil::cpuwide_time_ns() - start_ns);
+                }
+
+                if (events & (POLLOUT | POLLERR | POLLHUP)) {
+                    int64_t start_ns = butil::cpuwide_time_ns();
+                    CallOutputEventCallback(event_data_id, events, _thread_attr);
+                    (*g_edisp_write_lantency) << (butil::cpuwide_time_ns() - start_ns);
+                }
+
+                if (fd_to_rearm >= 0 && eid_to_rearm != 0) {
+                    RearmFd(ctx, fd_to_rearm, eid_to_rearm, events_to_rearm);
                 }
             }
             io_uring_cqe_seen(&ctx.ring, cqe);
