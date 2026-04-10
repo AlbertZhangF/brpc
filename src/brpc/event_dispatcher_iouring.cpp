@@ -121,11 +121,10 @@ EventDispatcher::~EventDispatcher() {
     Stop();
     Join();
     
-    IoUringContext& ctx = GetIoUringContext();
-    if (ctx.initialized) {
-        io_uring_queue_exit(&ctx.ring);
-        ctx.initialized = false;
-    }
+    // 注意：不要在这里销毁io_uring ring
+    // 因为多个EventDispatcher可能共享同一个全局ring
+    // ring的生命周期应该由最后一个使用的EventDispatcher管理
+    // 或者使用单独的ReleaseIoUringContext()来显式释放
     
     if (_wakeup_fds[0] > 0) {
         close(_wakeup_fds[0]);
@@ -204,6 +203,8 @@ int EventDispatcher::AddConsumer(IOEventDataId event_data_id, int fd) {
         return -1;
     }
     
+    LOG(INFO) << "AddConsumer: fd=" << fd << ", event_data_id=" << event_data_id;
+    
     struct io_uring_sqe* sqe = GetSqeWithRetry(ctx);
     if (!sqe) {
         LOG(ERROR) << "Failed to get SQE after retry";
@@ -222,6 +223,8 @@ int EventDispatcher::AddConsumer(IOEventDataId event_data_id, int fd) {
         LOG(ERROR) << "Failed to submit poll_add: " << strerror(-ret);
         return -1;
     }
+    
+    LOG(INFO) << "AddConsumer: submitted " << ret << " requests for fd=" << fd;
 
     return 0;
 }
@@ -362,6 +365,8 @@ void EventDispatcher::Run() {
         return;
     }
     
+    LOG(INFO) << "EventDispatcher::Run started, _stop=" << _stop;
+    
     while (!_stop) {
         int ret = io_uring_submit_and_wait(&ctx.ring, 1);
         
@@ -376,6 +381,8 @@ void EventDispatcher::Run() {
             PLOG(ERROR) << "io_uring_submit_and_wait failed";
             break;
         }
+        
+        LOG(INFO) << "io_uring returned " << ret << " events";
         
         unsigned head;
         unsigned count = 0;
