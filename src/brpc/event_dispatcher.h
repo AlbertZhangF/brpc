@@ -31,32 +31,33 @@ typedef VRefId IOEventDataId;
 const VRefId INVALID_IO_EVENT_DATA_ID = INVALID_VREF_ID;
 
 class IOEventData;
+class EventDispatcher;
 
 typedef VersionedRefWithIdUniquePtr<IOEventData> EventDataUniquePtr;
 
 namespace epoll_backend {
-void Init(class EventDispatcher*);
-void Destroy(class EventDispatcher*);
-int Start(class EventDispatcher*, const bthread_attr_t*);
-void Stop(class EventDispatcher*);
-int AddConsumer(class EventDispatcher*, IOEventDataId, int);
-int RemoveConsumer(class EventDispatcher*, int);
-int RegisterEvent(class EventDispatcher*, IOEventDataId, int, bool);
-int UnregisterEvent(class EventDispatcher*, IOEventDataId, int, bool);
-void Run(class EventDispatcher*);
+void Init(EventDispatcher*);
+void Destroy(EventDispatcher*);
+int Start(EventDispatcher*, const bthread_attr_t*);
+void Stop(EventDispatcher*);
+int AddConsumer(EventDispatcher*, IOEventDataId, int);
+int RemoveConsumer(EventDispatcher*, int);
+int RegisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+int UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+void Run(EventDispatcher*);
 }
 
 #ifdef BRPC_WITH_IO_URING
 namespace iouring_backend {
-void Init(class EventDispatcher*);
-void Destroy(class EventDispatcher*);
-int Start(class EventDispatcher*, const bthread_attr_t*);
-void Stop(class EventDispatcher*);
-int AddConsumer(class EventDispatcher*, IOEventDataId, int);
-int RemoveConsumer(class EventDispatcher*, int);
-int RegisterEvent(class EventDispatcher*, IOEventDataId, int, bool);
-int UnregisterEvent(class EventDispatcher*, IOEventDataId, int, bool);
-void Run(class EventDispatcher*);
+void Init(EventDispatcher*);
+void Destroy(EventDispatcher*);
+int Start(EventDispatcher*, const bthread_attr_t*);
+void Stop(EventDispatcher*);
+int AddConsumer(EventDispatcher*, IOEventDataId, int);
+int RemoveConsumer(EventDispatcher*, int);
+int RegisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+int UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+void Run(EventDispatcher*);
 }
 #endif
 
