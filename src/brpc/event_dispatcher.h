@@ -26,10 +26,6 @@
 
 namespace brpc {
 
-// Unique identifier of a IOEventData.
-// Users shall store EventDataId instead of EventData and call EventData::Address()
-// to convert the identifier to an unique_ptr at each access. Whenever a
-// unique_ptr is not destructed, the enclosed EventData will not be recycled.
 typedef VRefId IOEventDataId;
 
 const VRefId INVALID_IO_EVENT_DATA_ID = INVALID_VREF_ID;
@@ -37,6 +33,32 @@ const VRefId INVALID_IO_EVENT_DATA_ID = INVALID_VREF_ID;
 class IOEventData;
 
 typedef VersionedRefWithIdUniquePtr<IOEventData> EventDataUniquePtr;
+
+namespace epoll_backend {
+void Init(class EventDispatcher*);
+void Destroy(class EventDispatcher*);
+int Start(class EventDispatcher*, const bthread_attr_t*);
+void Stop(class EventDispatcher*);
+int AddConsumer(class EventDispatcher*, IOEventDataId, int);
+int RemoveConsumer(class EventDispatcher*, int);
+int RegisterEvent(class EventDispatcher*, IOEventDataId, int, bool);
+int UnregisterEvent(class EventDispatcher*, IOEventDataId, int, bool);
+void Run(class EventDispatcher*);
+}
+
+#ifdef BRPC_WITH_IO_URING
+namespace iouring_backend {
+void Init(class EventDispatcher*);
+void Destroy(class EventDispatcher*);
+int Start(class EventDispatcher*, const bthread_attr_t*);
+void Stop(class EventDispatcher*);
+int AddConsumer(class EventDispatcher*, IOEventDataId, int);
+int RemoveConsumer(class EventDispatcher*, int);
+int RegisterEvent(class EventDispatcher*, IOEventDataId, int, bool);
+int UnregisterEvent(class EventDispatcher*, IOEventDataId, int, bool);
+void Run(class EventDispatcher*);
+}
+#endif
 
 // User callback type of input event and output event.
 typedef int (*InputEventCallback) (void* id, uint32_t events,
@@ -93,6 +115,26 @@ class EventDispatcher {
 friend class Socket;
 friend class rdma::RdmaEndpoint;
 template <typename T> friend class IOEvent;
+friend void epoll_backend::Init(EventDispatcher*);
+friend void epoll_backend::Destroy(EventDispatcher*);
+friend int epoll_backend::Start(EventDispatcher*, const bthread_attr_t*);
+friend void epoll_backend::Stop(EventDispatcher*);
+friend int epoll_backend::AddConsumer(EventDispatcher*, IOEventDataId, int);
+friend int epoll_backend::RemoveConsumer(EventDispatcher*, int);
+friend int epoll_backend::RegisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+friend int epoll_backend::UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+friend void epoll_backend::Run(EventDispatcher*);
+#ifdef BRPC_WITH_IO_URING
+friend void iouring_backend::Init(EventDispatcher*);
+friend void iouring_backend::Destroy(EventDispatcher*);
+friend int iouring_backend::Start(EventDispatcher*, const bthread_attr_t*);
+friend void iouring_backend::Stop(EventDispatcher*);
+friend int iouring_backend::AddConsumer(EventDispatcher*, IOEventDataId, int);
+friend int iouring_backend::RemoveConsumer(EventDispatcher*, int);
+friend int iouring_backend::RegisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+friend int iouring_backend::UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
+friend void iouring_backend::Run(EventDispatcher*);
+#endif
 public:
     EventDispatcher();
     
@@ -133,6 +175,18 @@ public:
     // Returns 0 on success, -1 otherwise and errno is set
     int UnregisterEvent(IOEventDataId event_data_id, int fd, bool pollin);
 
+    static int CallInputEventCallback(IOEventDataId event_data_id,
+                                      uint32_t events,
+                                      const bthread_attr_t& thread_attr) {
+        return OnEvent<true>(event_data_id, events, thread_attr);
+    }
+
+    static int CallOutputEventCallback(IOEventDataId event_data_id,
+                                       uint32_t events,
+                                       const bthread_attr_t& thread_attr) {
+        return OnEvent<false>(event_data_id, events, thread_attr);
+    }
+
 private:
     DISALLOW_COPY_AND_ASSIGN(EventDispatcher);
 
@@ -158,18 +212,6 @@ private:
                data->CallOutputEventCallback(events, thread_attr);
     }
 
-    static int CallInputEventCallback(IOEventDataId event_data_id,
-                                      uint32_t events,
-                                      const bthread_attr_t& thread_attr) {
-        return OnEvent<true>(event_data_id, events, thread_attr);
-    }
-
-    static int CallOutputEventCallback(IOEventDataId event_data_id,
-                                       uint32_t events,
-                                       const bthread_attr_t& thread_attr) {
-        return OnEvent<false>(event_data_id, events, thread_attr);
-    }
-
     // The epoll/kqueue fd to watch events.
     int _event_dispatcher_fd;
 
@@ -184,6 +226,12 @@ private:
 
     // Pipe fds to wakeup EventDispatcher from `epoll_wait' in order to quit
     int _wakeup_fds[2];
+
+    // I/O backend type: 0=epoll, 1=io_uring
+    int _backend_type;
+
+    // io_uring context (used only when _backend_type==1)
+    void* _iouring_ctx;
 };
 
 EventDispatcher& GetGlobalEventDispatcher(int fd, bthread_tag_t tag);
