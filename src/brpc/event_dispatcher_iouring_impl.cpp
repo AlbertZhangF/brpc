@@ -36,12 +36,10 @@ struct IoUringFdInfo {
 struct IoUringContext {
     struct io_uring ring;
     bool initialized;
-    pthread_mutex_t fd_map_mutex;
     std::unordered_map<IOEventDataId, IoUringFdInfo> fd_info_map;
 
     IoUringContext() : initialized(false) {
         memset(&ring, 0, sizeof(ring));
-        pthread_mutex_init(&fd_map_mutex, NULL);
     }
 
     ~IoUringContext() {
@@ -49,16 +47,11 @@ struct IoUringContext {
             io_uring_queue_exit(&ring);
             initialized = false;
         }
-        pthread_mutex_destroy(&fd_map_mutex);
     }
 };
 
 static IoUringContext* GetCtx(EventDispatcher* disp) {
     return static_cast<IoUringContext*>(disp->_iouring_ctx);
-}
-
-static struct io_uring_sqe* GetSqe(IoUringContext* ctx) {
-    return io_uring_get_sqe(&ctx->ring);
 }
 
 void Init(EventDispatcher* disp) {
@@ -69,9 +62,9 @@ void Init(EventDispatcher* disp) {
     memset(&params, 0, sizeof(params));
 
     params.flags |= IORING_SETUP_CQSIZE;
-    params.cq_entries = 4096;
+    params.cq_entries = 8192;
 
-    int ret = io_uring_queue_init_params(512, &ctx->ring, &params);
+    int ret = io_uring_queue_init_params(1024, &ctx->ring, &params);
     if (ret < 0) {
         PLOG(FATAL) << "Fail to create io_uring: " << strerror(-ret);
         delete ctx;
@@ -144,7 +137,7 @@ void Stop(EventDispatcher* disp) {
     if (disp->_event_dispatcher_fd >= 0 && disp->_wakeup_fds[1] >= 0) {
         IoUringContext* ctx = GetCtx(disp);
         if (ctx && ctx->initialized) {
-            struct io_uring_sqe* sqe = GetSqe(ctx);
+            struct io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
             if (sqe) {
                 io_uring_prep_poll_add(sqe, disp->_wakeup_fds[1], POLLOUT);
                 sqe->user_data = IOURING_INTERNAL_EVENT;
@@ -152,6 +145,13 @@ void Stop(EventDispatcher* disp) {
             }
         }
     }
+}
+
+static int SubmitSqe(IoUringContext* ctx, struct io_uring_sqe* sqe) {
+    if (!sqe) {
+        return -1;
+    }
+    return io_uring_submit(&ctx->ring);
 }
 
 int AddConsumer(EventDispatcher* disp, IOEventDataId event_data_id, int fd) {
@@ -165,10 +165,10 @@ int AddConsumer(EventDispatcher* disp, IOEventDataId event_data_id, int fd) {
         return -1;
     }
 
-    struct io_uring_sqe* sqe = GetSqe(ctx);
+    struct io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
     if (!sqe) {
         io_uring_submit(&ctx->ring);
-        sqe = GetSqe(ctx);
+        sqe = io_uring_get_sqe(&ctx->ring);
         if (!sqe) {
             LOG(ERROR) << "Failed to get SQE";
             return -1;
@@ -178,9 +178,7 @@ int AddConsumer(EventDispatcher* disp, IOEventDataId event_data_id, int fd) {
     io_uring_prep_poll_add(sqe, fd, POLLIN | EPOLLET);
     sqe->user_data = event_data_id;
 
-    pthread_mutex_lock(&ctx->fd_map_mutex);
     ctx->fd_info_map[event_data_id] = IoUringFdInfo(fd, POLLIN | EPOLLET);
-    pthread_mutex_unlock(&ctx->fd_map_mutex);
 
     int ret = io_uring_submit(&ctx->ring);
     if (ret < 0) {
@@ -204,7 +202,6 @@ int RemoveConsumer(EventDispatcher* disp, int fd) {
     IOEventDataId event_data_id_to_remove = 0;
     bool found = false;
 
-    pthread_mutex_lock(&ctx->fd_map_mutex);
     for (auto it = ctx->fd_info_map.begin(); it != ctx->fd_info_map.end(); ++it) {
         if (it->second.fd == fd) {
             event_data_id_to_remove = it->first;
@@ -213,16 +210,15 @@ int RemoveConsumer(EventDispatcher* disp, int fd) {
             break;
         }
     }
-    pthread_mutex_unlock(&ctx->fd_map_mutex);
 
     if (!found) {
         return 0;
     }
 
-    struct io_uring_sqe* sqe = GetSqe(ctx);
+    struct io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
     if (!sqe) {
         io_uring_submit(&ctx->ring);
-        sqe = GetSqe(ctx);
+        sqe = io_uring_get_sqe(&ctx->ring);
         if (!sqe) {
             LOG(WARNING) << "Failed to get SQE for poll remove";
             return -1;
@@ -257,10 +253,10 @@ int RegisterEvent(EventDispatcher* disp, IOEventDataId event_data_id, int fd, bo
         events |= POLLIN;
     }
 
-    struct io_uring_sqe* sqe = GetSqe(ctx);
+    struct io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
     if (!sqe) {
         io_uring_submit(&ctx->ring);
-        sqe = GetSqe(ctx);
+        sqe = io_uring_get_sqe(&ctx->ring);
         if (!sqe) {
             LOG(ERROR) << "Failed to get SQE for register event";
             return -1;
@@ -270,9 +266,7 @@ int RegisterEvent(EventDispatcher* disp, IOEventDataId event_data_id, int fd, bo
     io_uring_prep_poll_add(sqe, fd, events);
     sqe->user_data = event_data_id;
 
-    pthread_mutex_lock(&ctx->fd_map_mutex);
     ctx->fd_info_map[event_data_id] = IoUringFdInfo(fd, events);
-    pthread_mutex_unlock(&ctx->fd_map_mutex);
 
     int ret = io_uring_submit(&ctx->ring);
     if (ret < 0) {
@@ -295,12 +289,10 @@ int UnregisterEvent(EventDispatcher* disp, IOEventDataId event_data_id, int fd, 
     }
 
     if (pollin) {
-        pthread_mutex_lock(&ctx->fd_map_mutex);
         auto it = ctx->fd_info_map.find(event_data_id);
         if (it != ctx->fd_info_map.end()) {
             it->second.events = POLLIN | EPOLLET;
         }
-        pthread_mutex_unlock(&ctx->fd_map_mutex);
         return 0;
     } else {
         return RemoveConsumer(disp, fd);
@@ -313,8 +305,6 @@ void Run(EventDispatcher* disp) {
         LOG(ERROR) << "io_uring context not initialized";
         return;
     }
-
-    struct io_uring_cqe* cqes[64];
 
     while (!disp->_stop) {
         int ret = io_uring_submit_and_wait(&ctx->ring, 1);
@@ -331,10 +321,13 @@ void Run(EventDispatcher* disp) {
             break;
         }
 
-        unsigned count = io_uring_peek_batch_cqe(&ctx->ring, cqes, 64);
+        unsigned head;
+        unsigned count = 0;
+        struct io_uring_cqe* cqe;
 
-        for (unsigned i = 0; i < count; ++i) {
-            struct io_uring_cqe* cqe = cqes[i];
+        io_uring_for_each_cqe(&ctx->ring, head, cqe) {
+            count++;
+
             IOEventDataId event_data_id = cqe->user_data;
             int32_t res = cqe->res;
 
@@ -344,9 +337,7 @@ void Run(EventDispatcher* disp) {
 
             if (res < 0) {
                 if (res == -EBADF || res == -ENOENT) {
-                    pthread_mutex_lock(&ctx->fd_map_mutex);
                     ctx->fd_info_map.erase(event_data_id);
-                    pthread_mutex_unlock(&ctx->fd_map_mutex);
                 } else if (res != -ECANCELED) {
                     LOG(WARNING) << "io_uring poll event failed: " << strerror(-res);
                 }
@@ -367,20 +358,13 @@ void Run(EventDispatcher* disp) {
                 (*g_edisp_write_lantency) << (butil::cpuwide_time_ns() - start_ns);
             }
 
-            pthread_mutex_lock(&ctx->fd_map_mutex);
             auto it = ctx->fd_info_map.find(event_data_id);
             if (it != ctx->fd_info_map.end()) {
-                int fd_to_rearm = it->second.fd;
-                uint32_t events_to_rearm = it->second.events;
-                pthread_mutex_unlock(&ctx->fd_map_mutex);
-
-                struct io_uring_sqe* sqe = GetSqe(ctx);
+                struct io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
                 if (sqe) {
-                    io_uring_prep_poll_add(sqe, fd_to_rearm, events_to_rearm);
+                    io_uring_prep_poll_add(sqe, it->second.fd, it->second.events);
                     sqe->user_data = event_data_id;
                 }
-            } else {
-                pthread_mutex_unlock(&ctx->fd_map_mutex);
             }
         }
 
