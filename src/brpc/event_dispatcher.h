@@ -116,26 +116,6 @@ class EventDispatcher {
 friend class Socket;
 friend class rdma::RdmaEndpoint;
 template <typename T> friend class IOEvent;
-friend void epoll_backend::Init(EventDispatcher*);
-friend void epoll_backend::Destroy(EventDispatcher*);
-friend int epoll_backend::Start(EventDispatcher*, const bthread_attr_t*);
-friend void epoll_backend::Stop(EventDispatcher*);
-friend int epoll_backend::AddConsumer(EventDispatcher*, IOEventDataId, int);
-friend int epoll_backend::RemoveConsumer(EventDispatcher*, int);
-friend int epoll_backend::RegisterEvent(EventDispatcher*, IOEventDataId, int, bool);
-friend int epoll_backend::UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
-friend void epoll_backend::Run(EventDispatcher*);
-#ifdef BRPC_WITH_IO_URING
-friend void iouring_backend::Init(EventDispatcher*);
-friend void iouring_backend::Destroy(EventDispatcher*);
-friend int iouring_backend::Start(EventDispatcher*, const bthread_attr_t*);
-friend void iouring_backend::Stop(EventDispatcher*);
-friend int iouring_backend::AddConsumer(EventDispatcher*, IOEventDataId, int);
-friend int iouring_backend::RemoveConsumer(EventDispatcher*, int);
-friend int iouring_backend::RegisterEvent(EventDispatcher*, IOEventDataId, int, bool);
-friend int iouring_backend::UnregisterEvent(EventDispatcher*, IOEventDataId, int, bool);
-friend void iouring_backend::Run(EventDispatcher*);
-#endif
 public:
     EventDispatcher();
     
@@ -188,6 +168,15 @@ public:
         return OnEvent<false>(event_data_id, events, thread_attr);
     }
 
+    // Internal data for backend implementations
+    int _event_dispatcher_fd;
+    volatile bool _stop;
+    bthread_t _tid;
+    bthread_attr_t _thread_attr;
+    int _wakeup_fds[2];
+    int _backend_type;
+    void* _iouring_ctx;
+
 private:
     DISALLOW_COPY_AND_ASSIGN(EventDispatcher);
 
@@ -212,27 +201,6 @@ private:
                data->CallInputEventCallback(events, thread_attr) :
                data->CallOutputEventCallback(events, thread_attr);
     }
-
-    // The epoll/kqueue fd to watch events.
-    int _event_dispatcher_fd;
-
-    // false unless Stop() is called.
-    volatile bool _stop;
-
-    // identifier of hosting bthread
-    bthread_t _tid;
-
-    // The attribute of bthreads calling user callbacks.
-    bthread_attr_t _thread_attr;
-
-    // Pipe fds to wakeup EventDispatcher from `epoll_wait' in order to quit
-    int _wakeup_fds[2];
-
-    // I/O backend type: 0=epoll, 1=io_uring
-    int _backend_type;
-
-    // io_uring context (used only when _backend_type==1)
-    void* _iouring_ctx;
 };
 
 EventDispatcher& GetGlobalEventDispatcher(int fd, bthread_tag_t tag);
