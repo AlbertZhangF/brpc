@@ -29,13 +29,15 @@ namespace brpc {
 extern bvar::LatencyRecorder* g_edisp_read_lantency;
 extern bvar::LatencyRecorder* g_edisp_write_lantency;
 
+static const uint64_t IOURING_INTERNAL_EVENT = 0xFFFFFFFFFFFFFFFEULL;
+
 struct IoUringFdInfo {
     IOEventDataId event_data_id;
     int fd;
     uint32_t events;
-    
+
     IoUringFdInfo() : event_data_id(0), fd(-1), events(0) {}
-    IoUringFdInfo(IOEventDataId id, int f, uint32_t e) 
+    IoUringFdInfo(IOEventDataId id, int f, uint32_t e)
         : event_data_id(id), fd(f), events(e) {}
 };
 
@@ -44,12 +46,12 @@ struct IoUringContext {
     bool initialized;
     pthread_mutex_t fd_map_mutex;
     std::vector<IoUringFdInfo> fd_info_vec;
-    
+
     IoUringContext() : initialized(false) {
         memset(&ring, 0, sizeof(ring));
         pthread_mutex_init(&fd_map_mutex, NULL);
     }
-    
+
     ~IoUringContext() {
         pthread_mutex_destroy(&fd_map_mutex);
     }
@@ -87,24 +89,24 @@ EventDispatcher::EventDispatcher()
     , _stop(false)
     , _tid(0)
     , _thread_attr(BTHREAD_ATTR_NORMAL) {
-    
+
     IoUringContext& ctx = GetIoUringContext();
-    
+
     struct io_uring_params params;
     memset(&params, 0, sizeof(params));
-    
+
     params.flags |= IORING_SETUP_CQSIZE;
     params.cq_entries = 256;
-    
+
     int ret = io_uring_queue_init_params(128, &ctx.ring, &params);
     if (ret < 0) {
         PLOG(FATAL) << "Fail to create io_uring: " << strerror(-ret);
         return;
     }
-    
+
     ctx.initialized = true;
     _event_dispatcher_fd = ctx.ring.ring_fd;
-    
+
     LOG(INFO) << "io_uring created: ring_fd=" << _event_dispatcher_fd
               << ", sq_entries=" << params.sq_entries
               << ", cq_entries=" << params.cq_entries;
@@ -120,12 +122,7 @@ EventDispatcher::EventDispatcher()
 EventDispatcher::~EventDispatcher() {
     Stop();
     Join();
-    
-    // 注意：不要在这里销毁io_uring ring
-    // 因为多个EventDispatcher可能共享同一个全局ring
-    // ring的生命周期应该由最后一个使用的EventDispatcher管理
-    // 或者使用单独的ReleaseIoUringContext()来显式释放
-    
+
     if (_wakeup_fds[0] > 0) {
         close(_wakeup_fds[0]);
         close(_wakeup_fds[1]);
@@ -140,9 +137,9 @@ int EventDispatcher::Start(const bthread_attr_t* thread_attr) {
         LOG(ERROR) << "io_uring was not created";
         return -1;
     }
-    
+
     if (_tid != 0) {
-        LOG(ERROR) << "Already started this dispatcher(" << this 
+        LOG(ERROR) << "Already started this dispatcher(" << this
                    << ") in bthread=" << _tid;
         return -1;
     }
@@ -174,7 +171,7 @@ void EventDispatcher::Stop() {
         struct io_uring_sqe* sqe = GetSqeWithRetry(ctx);
         if (sqe) {
             io_uring_prep_poll_add(sqe, _wakeup_fds[1], POLLOUT);
-            sqe->user_data = 0;
+            sqe->user_data = IOURING_INTERNAL_EVENT;
             io_uring_submit(&ctx.ring);
         } else {
             int ret = io_uring_submit(&ctx.ring);
@@ -198,13 +195,11 @@ int EventDispatcher::AddConsumer(IOEventDataId event_data_id, int fd) {
         errno = EINVAL;
         return -1;
     }
-    
+
     if (fd < 0) {
         return -1;
     }
-    
-    LOG(INFO) << "AddConsumer: fd=" << fd << ", event_data_id=" << event_data_id;
-    
+
     struct io_uring_sqe* sqe = GetSqeWithRetry(ctx);
     if (!sqe) {
         LOG(ERROR) << "Failed to get SQE after retry";
@@ -213,18 +208,16 @@ int EventDispatcher::AddConsumer(IOEventDataId event_data_id, int fd) {
 
     io_uring_prep_poll_add(sqe, fd, POLLIN | EPOLLET);
     sqe->user_data = event_data_id;
-    
+
     pthread_mutex_lock(&ctx.fd_map_mutex);
     ctx.fd_info_vec.push_back(IoUringFdInfo(event_data_id, fd, POLLIN | EPOLLET));
     pthread_mutex_unlock(&ctx.fd_map_mutex);
-    
+
     int ret = io_uring_submit(&ctx.ring);
     if (ret < 0) {
         LOG(ERROR) << "Failed to submit poll_add: " << strerror(-ret);
         return -1;
     }
-    
-    LOG(INFO) << "AddConsumer: submitted " << ret << " requests for fd=" << fd;
 
     return 0;
 }
@@ -233,26 +226,28 @@ int EventDispatcher::RemoveConsumer(int fd) {
     if (fd < 0) {
         return -1;
     }
-    
+
     IoUringContext& ctx = GetIoUringContext();
     if (!ctx.initialized) {
         return -1;
     }
-    
+
     IOEventDataId event_data_id_to_remove = 0;
-    
+    bool found = false;
+
     pthread_mutex_lock(&ctx.fd_map_mutex);
     for (size_t i = 0; i < ctx.fd_info_vec.size(); ++i) {
         if (ctx.fd_info_vec[i].fd == fd) {
             event_data_id_to_remove = ctx.fd_info_vec[i].event_data_id;
             ctx.fd_info_vec[i] = ctx.fd_info_vec.back();
             ctx.fd_info_vec.pop_back();
+            found = true;
             break;
         }
     }
     pthread_mutex_unlock(&ctx.fd_map_mutex);
-    
-    if (event_data_id_to_remove == 0) {
+
+    if (!found) {
         return 0;
     }
 
@@ -263,8 +258,8 @@ int EventDispatcher::RemoveConsumer(int fd) {
     }
 
     io_uring_prep_poll_remove(sqe, (unsigned long long)event_data_id_to_remove);
-    sqe->user_data = 0;
-    
+    sqe->user_data = IOURING_INTERNAL_EVENT;
+
     int ret = io_uring_submit(&ctx.ring);
     if (ret < 0) {
         LOG(WARNING) << "Failed to submit poll_remove: " << strerror(-ret);
@@ -281,7 +276,7 @@ int EventDispatcher::RegisterEvent(IOEventDataId event_data_id,
         errno = EINVAL;
         return -1;
     }
-    
+
     if (fd < 0) {
         return -1;
     }
@@ -299,11 +294,11 @@ int EventDispatcher::RegisterEvent(IOEventDataId event_data_id,
 
     io_uring_prep_poll_add(sqe, fd, events);
     sqe->user_data = event_data_id;
-    
+
     pthread_mutex_lock(&ctx.fd_map_mutex);
     ctx.fd_info_vec.push_back(IoUringFdInfo(event_data_id, fd, events));
     pthread_mutex_unlock(&ctx.fd_map_mutex);
-    
+
     int ret = io_uring_submit(&ctx.ring);
     if (ret < 0) {
         LOG(ERROR) << "Failed to submit register event: " << strerror(-ret);
@@ -320,7 +315,7 @@ int EventDispatcher::UnregisterEvent(IOEventDataId event_data_id,
         errno = EINVAL;
         return -1;
     }
-    
+
     if (fd < 0) {
         return -1;
     }
@@ -346,10 +341,10 @@ static int RearmFd(IoUringContext& ctx, int fd, IOEventDataId event_data_id, uin
         LOG(WARNING) << "Failed to get SQE for rearm after retry";
         return -1;
     }
-    
+
     io_uring_prep_poll_add(sqe, fd, events);
     sqe->user_data = event_data_id;
-    
+
     return io_uring_submit(&ctx.ring);
 }
 
@@ -364,22 +359,18 @@ void EventDispatcher::Run() {
         LOG(ERROR) << "io_uring context not initialized";
         return;
     }
-    
-    LOG(INFO) << "EventDispatcher::Run started, _stop=" << _stop;
-    
+
     while (!_stop) {
-        int submitted = io_uring_submit(&ctx.ring);
-        if (submitted < 0) {
-            if (submitted == -EINTR) {
-                continue;
-            }
-            PLOG(ERROR) << "io_uring_submit failed";
-            break;
-        }
-        
         struct io_uring_cqe* cqe = NULL;
         int wait_ret = io_uring_wait_cqe(&ctx.ring, &cqe);
-        
+
+        if (_stop) {
+            if (cqe) {
+                io_uring_cqe_seen(&ctx.ring, cqe);
+            }
+            break;
+        }
+
         if (wait_ret < 0) {
             if (wait_ret == -EINTR) {
                 continue;
@@ -387,46 +378,57 @@ void EventDispatcher::Run() {
             PLOG(ERROR) << "io_uring_wait_cqe failed";
             break;
         }
-        
-        if (cqe) {
-            IOEventDataId event_data_id = cqe->user_data;
-            int32_t res = cqe->res;
-            LOG(INFO) << "CQE received: event_data_id=" << event_data_id << ", res=" << res;
-            if (event_data_id != 0 && res >= 0) {
-                uint32_t events = static_cast<uint32_t>(res);
 
-                pthread_mutex_lock(&ctx.fd_map_mutex);
-                int fd_to_rearm = -1;
-                IOEventDataId eid_to_rearm = 0;
-                uint32_t events_to_rearm = 0;
+        if (!cqe) {
+            continue;
+        }
 
-                for (size_t i = 0; i < ctx.fd_info_vec.size(); ++i) {
-                    if (ctx.fd_info_vec[i].event_data_id == event_data_id) {
-                        fd_to_rearm = ctx.fd_info_vec[i].fd;
-                        eid_to_rearm = event_data_id;
-                        events_to_rearm = ctx.fd_info_vec[i].events;
-                        break;
-                    }
-                }
-                pthread_mutex_unlock(&ctx.fd_map_mutex);
+        IOEventDataId event_data_id = cqe->user_data;
+        int32_t res = cqe->res;
+        io_uring_cqe_seen(&ctx.ring, cqe);
 
-                if (events & (POLLIN | POLLERR | POLLHUP)) {
-                    int64_t start_ns = butil::cpuwide_time_ns();
-                    CallInputEventCallback(event_data_id, events, _thread_attr);
-                    (*g_edisp_read_lantency) << (butil::cpuwide_time_ns() - start_ns);
-                }
+        if (event_data_id == IOURING_INTERNAL_EVENT) {
+            continue;
+        }
 
-                if (events & (POLLOUT | POLLERR | POLLHUP)) {
-                    int64_t start_ns = butil::cpuwide_time_ns();
-                    CallOutputEventCallback(event_data_id, events, _thread_attr);
-                    (*g_edisp_write_lantency) << (butil::cpuwide_time_ns() - start_ns);
-                }
-
-                if (fd_to_rearm >= 0 && eid_to_rearm != 0) {
-                    RearmFd(ctx, fd_to_rearm, eid_to_rearm, events_to_rearm);
-                }
+        if (res < 0) {
+            if (res != -ECANCELED) {
+                LOG(WARNING) << "io_uring poll event failed: " << strerror(-res);
             }
-            io_uring_cqe_seen(&ctx.ring, cqe);
+            continue;
+        }
+
+        uint32_t events = static_cast<uint32_t>(res);
+
+        pthread_mutex_lock(&ctx.fd_map_mutex);
+        int fd_to_rearm = -1;
+        uint32_t events_to_rearm = 0;
+        bool found = false;
+
+        for (size_t i = 0; i < ctx.fd_info_vec.size(); ++i) {
+            if (ctx.fd_info_vec[i].event_data_id == event_data_id) {
+                fd_to_rearm = ctx.fd_info_vec[i].fd;
+                events_to_rearm = ctx.fd_info_vec[i].events;
+                found = true;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&ctx.fd_map_mutex);
+
+        if (events & (POLLIN | POLLERR | POLLHUP)) {
+            int64_t start_ns = butil::cpuwide_time_ns();
+            CallInputEventCallback(event_data_id, events, _thread_attr);
+            (*g_edisp_read_lantency) << (butil::cpuwide_time_ns() - start_ns);
+        }
+
+        if (events & (POLLOUT | POLLERR | POLLHUP)) {
+            int64_t start_ns = butil::cpuwide_time_ns();
+            CallOutputEventCallback(event_data_id, events, _thread_attr);
+            (*g_edisp_write_lantency) << (butil::cpuwide_time_ns() - start_ns);
+        }
+
+        if (found) {
+            RearmFd(ctx, fd_to_rearm, event_data_id, events_to_rearm);
         }
     }
 }
