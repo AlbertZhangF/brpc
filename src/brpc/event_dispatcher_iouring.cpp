@@ -392,7 +392,17 @@ void EventDispatcher::Run() {
         }
 
         if (res < 0) {
-            if (res != -ECANCELED) {
+            if (res == -EBADF || res == -ENOENT) {
+                pthread_mutex_lock(&ctx.fd_map_mutex);
+                for (size_t i = 0; i < ctx.fd_info_vec.size(); ++i) {
+                    if (ctx.fd_info_vec[i].event_data_id == event_data_id) {
+                        ctx.fd_info_vec[i] = ctx.fd_info_vec.back();
+                        ctx.fd_info_vec.pop_back();
+                        break;
+                    }
+                }
+                pthread_mutex_unlock(&ctx.fd_map_mutex);
+            } else if (res != -ECANCELED) {
                 LOG(WARNING) << "io_uring poll event failed: " << strerror(-res);
             }
             continue;
