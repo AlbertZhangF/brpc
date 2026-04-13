@@ -142,6 +142,7 @@ EventDispatcher::EventDispatcher()
     , _stop(false)
     , _tid(0)
     , _thread_attr(BTHREAD_ATTR_NORMAL)
+    , _wakeup_fds{-1, -1}
     , _backend_type(ResolveIoBackend())
     , _iouring_ctx(NULL) {
     if (_backend_type == IO_BACKEND_IOURING) {
