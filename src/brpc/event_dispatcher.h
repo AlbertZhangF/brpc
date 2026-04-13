@@ -177,11 +177,11 @@ public:
     int _backend_type;
     void* _iouring_ctx;
 
-private:
-    DISALLOW_COPY_AND_ASSIGN(EventDispatcher);
-
     // Calls Run()
     static void* RunThis(void* arg);
+
+private:
+    DISALLOW_COPY_AND_ASSIGN(EventDispatcher);
 
     // Thread entry.
     void Run();
