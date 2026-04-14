@@ -42,6 +42,15 @@ DEFINE_bool(usercode_in_coroutine, false,
 
 DEFINE_string(io_backend, "auto",
               "I/O backend: auto, epoll, io_uring. Only works when BRPC_WITH_IO_URING is enabled");
+DEFINE_bool(io_uring_sqpoll, false,
+            "Enable io_uring SQPOLL mode. Kernel thread polls SQ to avoid submit syscalls. "
+            "Requires kernel 5.11+ and root/CAP_SYS_NICE. Only works with --io_backend=io_uring");
+DEFINE_int32(io_uring_sqpoll_cpu, -1,
+             "CPU affinity for io_uring SQPOLL kernel thread. -1 means auto. "
+             "Only works with --io_uring_sqpoll=true");
+DEFINE_int32(io_uring_sqpoll_idle, 2000,
+             "Idle time in milliseconds before SQPOLL kernel thread goes to sleep. "
+             "Only works with --io_uring_sqpoll=true");
 
 static const int IO_BACKEND_EPOLL = 0;
 static const int IO_BACKEND_IOURING = 1;

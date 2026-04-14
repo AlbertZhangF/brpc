@@ -17,8 +17,9 @@
 
 #include <liburing.h>
 #include <poll.h>
+#include <sys/utsname.h>
 #include <unordered_map>
-#include <pthread.h>
+#include <sched.h>
 
 namespace brpc {
 namespace iouring_backend {
@@ -36,9 +37,10 @@ struct IoUringFdInfo {
 struct IoUringContext {
     struct io_uring ring;
     bool initialized;
+    bool sqpoll;
     std::unordered_map<IOEventDataId, IoUringFdInfo> fd_info_map;
 
-    IoUringContext() : initialized(false) {
+    IoUringContext() : initialized(false), sqpoll(false) {
         memset(&ring, 0, sizeof(ring));
     }
 
@@ -48,10 +50,41 @@ struct IoUringContext {
             initialized = false;
         }
     }
+
+    bool NeedsSubmit() const {
+        return !sqpoll;
+    }
+
+    int Submit() {
+        if (sqpoll) {
+            return 0;
+        }
+        return io_uring_submit(&ring);
+    }
+
+    int SubmitAndWait(unsigned wait_nr) {
+        if (sqpoll) {
+            while (io_uring_cq_ready(&ring) < (int)wait_nr) {
+                io_uring_sqring_wait(&ring);
+            }
+            return 0;
+        }
+        return io_uring_submit_and_wait(&ring, wait_nr);
+    }
 };
 
 static IoUringContext* GetCtx(EventDispatcher* disp) {
     return static_cast<IoUringContext*>(disp->_iouring_ctx);
+}
+
+static int GetKernelVersion() {
+    struct utsname buf;
+    if (uname(&buf) != 0) {
+        return 0;
+    }
+    int major = 0, minor = 0;
+    sscanf(buf.release, "%d.%d", &major, &minor);
+    return major * 1000 + minor;
 }
 
 void Init(EventDispatcher* disp) {
@@ -64,20 +97,55 @@ void Init(EventDispatcher* disp) {
     params.flags |= IORING_SETUP_CQSIZE;
     params.cq_entries = 8192;
 
+    bool use_sqpoll = FLAGS_io_uring_sqpoll;
+    int kernel_ver = GetKernelVersion();
+
+    if (use_sqpoll && kernel_ver < 5011) {
+        LOG(WARNING) << "io_uring SQPOLL requires kernel 5.11+, current kernel is "
+                     << kernel_ver / 1000 << "." << kernel_ver % 1000
+                     << ", falling back to default mode";
+        use_sqpoll = false;
+    }
+
+    if (use_sqpoll) {
+        params.flags |= IORING_SETUP_SQPOLL;
+        params.sq_thread_idle = FLAGS_io_uring_sqpoll_idle * 1000;
+
+        if (FLAGS_io_uring_sqpoll_cpu >= 0) {
+            params.flags |= IORING_SETUP_SQ_AFF;
+            params.sq_thread_cpu = FLAGS_io_uring_sqpoll_cpu;
+        }
+    }
+
     int ret = io_uring_queue_init_params(1024, &ctx->ring, &params);
     if (ret < 0) {
-        PLOG(FATAL) << "Fail to create io_uring: " << strerror(-ret);
-        delete ctx;
-        disp->_iouring_ctx = NULL;
-        return;
+        if (use_sqpoll && (ret == -EINVAL || ret == -EPERM)) {
+            LOG(WARNING) << "io_uring SQPOLL not supported (ret=" << ret
+                         << "), retrying without SQPOLL";
+            use_sqpoll = false;
+            memset(&params, 0, sizeof(params));
+            params.flags |= IORING_SETUP_CQSIZE;
+            params.cq_entries = 8192;
+            ret = io_uring_queue_init_params(1024, &ctx->ring, &params);
+        }
+        if (ret < 0) {
+            PLOG(FATAL) << "Fail to create io_uring: " << strerror(-ret);
+            delete ctx;
+            disp->_iouring_ctx = NULL;
+            return;
+        }
     }
 
     ctx->initialized = true;
+    ctx->sqpoll = use_sqpoll;
     disp->_event_dispatcher_fd = ctx->ring.ring_fd;
 
     LOG(INFO) << "io_uring created: ring_fd=" << disp->_event_dispatcher_fd
               << ", sq_entries=" << params.sq_entries
-              << ", cq_entries=" << params.cq_entries;
+              << ", cq_entries=" << params.cq_entries
+              << ", sqpoll=" << (use_sqpoll ? "enabled" : "disabled")
+              << ", sq_thread_cpu=" << (use_sqpoll ? params.sq_thread_cpu : -1)
+              << ", sq_thread_idle=" << (use_sqpoll ? params.sq_thread_idle / 1000 : 0) << "ms";
 
     disp->_wakeup_fds[0] = -1;
     disp->_wakeup_fds[1] = -1;
@@ -141,17 +209,10 @@ void Stop(EventDispatcher* disp) {
             if (sqe) {
                 io_uring_prep_poll_add(sqe, disp->_wakeup_fds[1], POLLOUT);
                 sqe->user_data = IOURING_INTERNAL_EVENT;
-                io_uring_submit(&ctx->ring);
+                ctx->Submit();
             }
         }
     }
-}
-
-static int SubmitSqe(IoUringContext* ctx, struct io_uring_sqe* sqe) {
-    if (!sqe) {
-        return -1;
-    }
-    return io_uring_submit(&ctx->ring);
 }
 
 int AddConsumer(EventDispatcher* disp, IOEventDataId event_data_id, int fd) {
@@ -167,7 +228,7 @@ int AddConsumer(EventDispatcher* disp, IOEventDataId event_data_id, int fd) {
 
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
     if (!sqe) {
-        io_uring_submit(&ctx->ring);
+        ctx->Submit();
         sqe = io_uring_get_sqe(&ctx->ring);
         if (!sqe) {
             LOG(ERROR) << "Failed to get SQE";
@@ -180,8 +241,8 @@ int AddConsumer(EventDispatcher* disp, IOEventDataId event_data_id, int fd) {
 
     ctx->fd_info_map[event_data_id] = IoUringFdInfo(fd, POLLIN | EPOLLET);
 
-    int ret = io_uring_submit(&ctx->ring);
-    if (ret < 0) {
+    int ret = ctx->Submit();
+    if (ret < 0 && !ctx->sqpoll) {
         LOG(ERROR) << "Failed to submit poll_add: " << strerror(-ret);
         return -1;
     }
@@ -217,7 +278,7 @@ int RemoveConsumer(EventDispatcher* disp, int fd) {
 
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
     if (!sqe) {
-        io_uring_submit(&ctx->ring);
+        ctx->Submit();
         sqe = io_uring_get_sqe(&ctx->ring);
         if (!sqe) {
             LOG(WARNING) << "Failed to get SQE for poll remove";
@@ -228,8 +289,8 @@ int RemoveConsumer(EventDispatcher* disp, int fd) {
     io_uring_prep_poll_remove(sqe, (unsigned long long)event_data_id_to_remove);
     sqe->user_data = IOURING_INTERNAL_EVENT;
 
-    int ret = io_uring_submit(&ctx->ring);
-    if (ret < 0) {
+    int ret = ctx->Submit();
+    if (ret < 0 && !ctx->sqpoll) {
         LOG(WARNING) << "Failed to submit poll_remove: " << strerror(-ret);
         return -1;
     }
@@ -255,7 +316,7 @@ int RegisterEvent(EventDispatcher* disp, IOEventDataId event_data_id, int fd, bo
 
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ctx->ring);
     if (!sqe) {
-        io_uring_submit(&ctx->ring);
+        ctx->Submit();
         sqe = io_uring_get_sqe(&ctx->ring);
         if (!sqe) {
             LOG(ERROR) << "Failed to get SQE for register event";
@@ -268,8 +329,8 @@ int RegisterEvent(EventDispatcher* disp, IOEventDataId event_data_id, int fd, bo
 
     ctx->fd_info_map[event_data_id] = IoUringFdInfo(fd, events);
 
-    int ret = io_uring_submit(&ctx->ring);
-    if (ret < 0) {
+    int ret = ctx->Submit();
+    if (ret < 0 && !ctx->sqpoll) {
         LOG(ERROR) << "Failed to submit register event: " << strerror(-ret);
         return -1;
     }
@@ -307,7 +368,7 @@ void Run(EventDispatcher* disp) {
     }
 
     while (!disp->_stop) {
-        int ret = io_uring_submit_and_wait(&ctx->ring, 1);
+        int ret = ctx->SubmitAndWait(1);
 
         if (disp->_stop) {
             break;
@@ -317,7 +378,7 @@ void Run(EventDispatcher* disp) {
             if (ret == -EINTR) {
                 continue;
             }
-            PLOG(ERROR) << "io_uring_submit_and_wait failed";
+            PLOG(ERROR) << "io_uring wait failed";
             break;
         }
 
@@ -370,7 +431,7 @@ void Run(EventDispatcher* disp) {
 
         if (count > 0) {
             io_uring_cq_advance(&ctx->ring, count);
-            io_uring_submit(&ctx->ring);
+            ctx->Submit();
         }
     }
 }
