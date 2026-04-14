@@ -51,24 +51,11 @@ struct IoUringContext {
         }
     }
 
-    bool NeedsSubmit() const {
-        return !sqpoll;
-    }
-
     int Submit() {
-        if (sqpoll) {
-            return 0;
-        }
         return io_uring_submit(&ring);
     }
 
     int SubmitAndWait(unsigned wait_nr) {
-        if (sqpoll) {
-            while (io_uring_cq_ready(&ring) < (int)wait_nr) {
-                io_uring_sqring_wait(&ring);
-            }
-            return 0;
-        }
         return io_uring_submit_and_wait(&ring, wait_nr);
     }
 };
@@ -144,7 +131,7 @@ void Init(EventDispatcher* disp) {
               << ", sq_entries=" << params.sq_entries
               << ", cq_entries=" << params.cq_entries
               << ", sqpoll=" << (use_sqpoll ? "enabled" : "disabled")
-              << ", sq_thread_cpu=" << (use_sqpoll ? params.sq_thread_cpu : -1)
+              << ", sq_thread_cpu=" << (use_sqpoll ? (int)params.sq_thread_cpu : -1)
               << ", sq_thread_idle=" << (use_sqpoll ? params.sq_thread_idle / 1000 : 0) << "ms";
 
     disp->_wakeup_fds[0] = -1;
@@ -242,7 +229,7 @@ int AddConsumer(EventDispatcher* disp, IOEventDataId event_data_id, int fd) {
     ctx->fd_info_map[event_data_id] = IoUringFdInfo(fd, POLLIN | EPOLLET);
 
     int ret = ctx->Submit();
-    if (ret < 0 && !ctx->sqpoll) {
+    if (ret < 0) {
         LOG(ERROR) << "Failed to submit poll_add: " << strerror(-ret);
         return -1;
     }
@@ -290,7 +277,7 @@ int RemoveConsumer(EventDispatcher* disp, int fd) {
     sqe->user_data = IOURING_INTERNAL_EVENT;
 
     int ret = ctx->Submit();
-    if (ret < 0 && !ctx->sqpoll) {
+    if (ret < 0) {
         LOG(WARNING) << "Failed to submit poll_remove: " << strerror(-ret);
         return -1;
     }
@@ -330,7 +317,7 @@ int RegisterEvent(EventDispatcher* disp, IOEventDataId event_data_id, int fd, bo
     ctx->fd_info_map[event_data_id] = IoUringFdInfo(fd, events);
 
     int ret = ctx->Submit();
-    if (ret < 0 && !ctx->sqpoll) {
+    if (ret < 0) {
         LOG(ERROR) << "Failed to submit register event: " << strerror(-ret);
         return -1;
     }
