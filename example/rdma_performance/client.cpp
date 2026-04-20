@@ -53,6 +53,7 @@ bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
+butil::atomic<uint64_t> g_inflight;
 std::vector<std::string> g_servers;
 int rr_index = 0;
 volatile bool g_stop = false;
@@ -133,8 +134,16 @@ public:
     };
 
     void SendRequest() {
+        if (_stop) {
+            g_inflight.fetch_sub(1, butil::memory_order_relaxed);
+            return;
+        }
         if (FLAGS_expected_qps > 0) {
             while (g_token.load(butil::memory_order_relaxed) <= 0) {
+                if (_stop) {
+                    g_inflight.fetch_sub(1, butil::memory_order_relaxed);
+                    return;
+                }
                 bthread_usleep(10);
             }
             g_token.fetch_sub(1, butil::memory_order_relaxed);
@@ -154,9 +163,11 @@ public:
     static void HandleResponse(RespClosure* closure) {
         std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
         std::unique_ptr<test::PerfTestResponse> response_guard(closure->resp);
+
         if (closure->cntl->Failed()) {
             LOG(ERROR) << "RPC call failed: " << closure->cntl->ErrorText();
             closure->test->_stop = true;
+            g_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
 
@@ -167,36 +178,55 @@ public:
         g_total_bytes.fetch_add(closure->cntl->request_attachment().size(), butil::memory_order_relaxed);
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
 
+        PerformanceTest* test = closure->test;
         cntl_guard.reset(NULL);
         response_guard.reset(NULL);
 
-        if (closure->test->_iterations == 0 && FLAGS_test_iterations > 0) {
-            closure->test->_stop = true;
+        if (test->_iterations == 0 && FLAGS_test_iterations > 0) {
+            test->_stop = true;
+            g_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
-        --closure->test->_iterations;
-        uint64_t last = g_last_time.load(butil::memory_order_relaxed);
+        --test->_iterations;
+
         uint64_t now = butil::gettimeofday_us();
+        uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         if (now > last && now - last > 100000) {
             if (g_last_time.exchange(now, butil::memory_order_relaxed) == last) {
-                g_client_cpu_recorder << 
+                g_client_cpu_recorder <<
                     atof(bvar::Variable::describe_exposed("process_cpu_usage").c_str()) * 100;
             }
         }
-        if (now - closure->test->_start_time > FLAGS_test_seconds * 1000000u) {
-            closure->test->_stop = true;
+        if (now - test->_start_time > (uint64_t)FLAGS_test_seconds * 1000000u) {
+            test->_stop = true;
+            g_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
-        closure->test->SendRequest();
+
+        test->SendRequest();
     }
 
     static void* RunTest(void* arg) {
         PerformanceTest* test = (PerformanceTest*)arg;
         test->_start_time = butil::gettimeofday_us();
         test->_iterations = FLAGS_test_iterations;
-        
+
         for (int i = 0; i < FLAGS_queue_depth; ++i) {
+            g_inflight.fetch_add(1, butil::memory_order_relaxed);
             test->SendRequest();
+        }
+
+        while (!test->_stop) {
+            uint64_t current_inflight = g_inflight.load(butil::memory_order_relaxed);
+            if (current_inflight < (uint64_t)FLAGS_queue_depth) {
+                uint64_t to_add = FLAGS_queue_depth - current_inflight;
+                for (uint64_t i = 0; i < to_add; ++i) {
+                    g_inflight.fetch_add(1, butil::memory_order_relaxed);
+                    test->SendRequest();
+                    if (test->_stop) break;
+                }
+            }
+            bthread_usleep(100);
         }
 
         return NULL;
@@ -227,6 +257,7 @@ void Test(int thread_num, int attachment_size) {
         << std::endl;
     g_total_bytes.store(0, butil::memory_order_relaxed);
     g_total_cnt.store(0, butil::memory_order_relaxed);
+    g_inflight.store(0, butil::memory_order_relaxed);
     std::vector<PerformanceTest*> tests;
     for (int k = 0; k < thread_num; ++k) {
         PerformanceTest* t = new PerformanceTest(attachment_size, FLAGS_echo_attachment);
@@ -274,7 +305,6 @@ void Test(int thread_num, int attachment_size) {
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
 
-    // Initialize RDMA environment in advance.
     if (FLAGS_use_rdma) {
         brpc::rdma::GlobalRdmaInitializeOrDie();
     }
