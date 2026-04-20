@@ -148,6 +148,10 @@ endif()
 
 add_executable(client client.cpp ${PROTO_SRC} ${PROTO_HEADER})
 add_executable(server server.cpp ${PROTO_SRC} ${PROTO_HEADER})
+add_executable(extreme_client extreme_client.cpp ${PROTO_SRC} ${PROTO_HEADER})
+add_executable(extreme_server extreme_server.cpp ${PROTO_SRC} ${PROTO_HEADER})
 
 target_link_libraries(client ${BRPC_LIB} ${DYNAMIC_LIB})
 target_link_libraries(server ${BRPC_LIB} ${DYNAMIC_LIB})
+target_link_libraries(extreme_client ${BRPC_LIB} ${DYNAMIC_LIB})
+target_link_libraries(extreme_server ${BRPC_LIB} ${DYNAMIC_LIB})
