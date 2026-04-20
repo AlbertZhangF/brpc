@@ -53,7 +53,6 @@ bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
-butil::atomic<uint64_t> g_inflight;
 std::vector<std::string> g_servers;
 int rr_index = 0;
 volatile bool g_stop = false;
@@ -83,6 +82,7 @@ public:
         , _start_time(0)
         , _iterations(0)
         , _stop(false)
+        , _inflight(0)
     {
         if (attachment_size > 0) {
             _addr = malloc(attachment_size);
@@ -133,16 +133,14 @@ public:
         PerformanceTest* test;
     };
 
-    void SendRequest() {
+    bool SendRequest() {
         if (_stop) {
-            g_inflight.fetch_sub(1, butil::memory_order_relaxed);
-            return;
+            return false;
         }
         if (FLAGS_expected_qps > 0) {
             while (g_token.load(butil::memory_order_relaxed) <= 0) {
                 if (_stop) {
-                    g_inflight.fetch_sub(1, butil::memory_order_relaxed);
-                    return;
+                    return false;
                 }
                 bthread_usleep(10);
             }
@@ -155,19 +153,24 @@ public:
         request.set_echo_attachment(_echo_attachment);
         closure->cntl->request_attachment().append(_attachment);
         closure->test = this;
+        ++_inflight;
         google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
         test::PerfTestService_Stub stub(_channel);
         stub.Test(closure->cntl, &request, closure->resp, done);
+        return true;
     }
 
     static void HandleResponse(RespClosure* closure) {
         std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
         std::unique_ptr<test::PerfTestResponse> response_guard(closure->resp);
+        PerformanceTest* test = closure->test;
+        --test->_inflight;
 
         if (closure->cntl->Failed()) {
-            LOG(ERROR) << "RPC call failed: " << closure->cntl->ErrorText();
-            closure->test->_stop = true;
-            g_inflight.fetch_sub(1, butil::memory_order_relaxed);
+            if (!test->_stop) {
+                LOG(ERROR) << "RPC call failed: " << closure->cntl->ErrorText();
+            }
+            test->_stop = true;
             return;
         }
 
@@ -178,13 +181,11 @@ public:
         g_total_bytes.fetch_add(closure->cntl->request_attachment().size(), butil::memory_order_relaxed);
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
 
-        PerformanceTest* test = closure->test;
         cntl_guard.reset(NULL);
         response_guard.reset(NULL);
 
         if (test->_iterations == 0 && FLAGS_test_iterations > 0) {
             test->_stop = true;
-            g_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
         --test->_iterations;
@@ -199,7 +200,6 @@ public:
         }
         if (now - test->_start_time > (uint64_t)FLAGS_test_seconds * 1000000u) {
             test->_stop = true;
-            g_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
 
@@ -212,18 +212,15 @@ public:
         test->_iterations = FLAGS_test_iterations;
 
         for (int i = 0; i < FLAGS_queue_depth; ++i) {
-            g_inflight.fetch_add(1, butil::memory_order_relaxed);
-            test->SendRequest();
+            if (!test->SendRequest()) {
+                break;
+            }
         }
 
         while (!test->_stop) {
-            uint64_t current_inflight = g_inflight.load(butil::memory_order_relaxed);
-            if (current_inflight < (uint64_t)FLAGS_queue_depth) {
-                uint64_t to_add = FLAGS_queue_depth - current_inflight;
-                for (uint64_t i = 0; i < to_add; ++i) {
-                    g_inflight.fetch_add(1, butil::memory_order_relaxed);
-                    test->SendRequest();
-                    if (test->_stop) break;
+            if (test->_inflight < FLAGS_queue_depth) {
+                if (!test->SendRequest()) {
+                    break;
                 }
             }
             bthread_usleep(100);
@@ -240,6 +237,7 @@ private:
     volatile bool _stop;
     butil::IOBuf _attachment;
     bool _echo_attachment;
+    int _inflight;
 };
 
 static void* DeleteTest(void* arg) {
@@ -257,7 +255,6 @@ void Test(int thread_num, int attachment_size) {
         << std::endl;
     g_total_bytes.store(0, butil::memory_order_relaxed);
     g_total_cnt.store(0, butil::memory_order_relaxed);
-    g_inflight.store(0, butil::memory_order_relaxed);
     std::vector<PerformanceTest*> tests;
     for (int k = 0; k < thread_num; ++k) {
         PerformanceTest* t = new PerformanceTest(attachment_size, FLAGS_echo_attachment);
