@@ -45,6 +45,8 @@ DEFINE_int32(test_seconds, 10, "Test duration in seconds");
 DEFINE_int32(dummy_port, 8001, "Dummy server port");
 DEFINE_int32(channel_per_thread, 1, "Number of channels per sender thread");
 DEFINE_bool(ignore_eovercrowded, false, "Ignore EOVERCROWDED errors");
+DEFINE_int32(max_inflight, 1000,
+             "Max inflight requests per sender thread");
 
 bvar::LatencyRecorder g_latency_recorder("extreme_client");
 bvar::LatencyRecorder g_server_cpu_recorder("extreme_server_cpu");
@@ -65,7 +67,6 @@ public:
         , _echo_attachment(echo_attachment)
         , _stop(false)
         , _inflight(0)
-        , _total_sent(0)
         , _total_error(0)
         , _total_overcrowded(0)
     {
@@ -100,10 +101,9 @@ public:
     }
 
     inline bool IsStop() const { return _stop; }
-    inline int inflight() const { return _inflight; }
-    inline uint64_t total_sent() const { return _total_sent; }
-    inline uint64_t total_error() const { return _total_error; }
-    inline uint64_t total_overcrowded() const { return _total_overcrowded; }
+    inline int inflight() const { return _inflight.load(butil::memory_order_relaxed); }
+    inline uint64_t total_error() const { return _total_error.load(butil::memory_order_relaxed); }
+    inline uint64_t total_overcrowded() const { return _total_overcrowded.load(butil::memory_order_relaxed); }
 
     struct RespClosure {
         brpc::Controller* cntl;
@@ -126,8 +126,7 @@ public:
         request.set_echo_attachment(_echo_attachment);
         closure->cntl->request_attachment().append(_attachment);
         closure->sender = this;
-        ++_inflight;
-        ++_total_sent;
+        _inflight.fetch_add(1, butil::memory_order_relaxed);
 
         google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
         test::PerfTestService_Stub stub(ch);
@@ -139,7 +138,7 @@ public:
         std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
         std::unique_ptr<test::PerfTestResponse> resp_guard(closure->resp);
         ExtremeSender* sender = closure->sender;
-        --sender->_inflight;
+        sender->_inflight.fetch_sub(1, butil::memory_order_relaxed);
 
         if (closure->cntl->Failed()) {
             ++sender->_total_error;
@@ -147,16 +146,6 @@ public:
             if (closure->cntl->ErrorCode() == brpc::EOVERCROWDED) {
                 ++sender->_total_overcrowded;
                 g_overcrowded_cnt << 1;
-                if (!sender->_stop) {
-                    bthread_usleep(1000);
-                    sender->SendRequest();
-                    return;
-                }
-            } else {
-                if (!sender->_stop) {
-                    LOG(ERROR) << "RPC failed: " << closure->cntl->ErrorText();
-                }
-                sender->_stop = true;
             }
             return;
         }
@@ -171,8 +160,6 @@ public:
         cntl_guard.reset(NULL);
         resp_guard.reset(NULL);
 
-        if (sender->_stop) return;
-
         uint64_t now = butil::gettimeofday_us();
         uint64_t last = g_last_cpu_time.load(butil::memory_order_relaxed);
         if (now > last && now - last > 100000) {
@@ -181,15 +168,27 @@ public:
                     atof(bvar::Variable::describe_exposed("process_cpu_usage").c_str()) * 100;
             }
         }
-
-        sender->SendRequest();
     }
 
     static void* RunSender(void* arg) {
         ExtremeSender* sender = (ExtremeSender*)arg;
+        uint64_t start_time = butil::gettimeofday_us();
 
-        while (!sender->_stop && !g_stop) {
-            sender->SendRequest();
+        while (!g_stop) {
+            uint64_t now = butil::gettimeofday_us();
+            if (now - start_time > (uint64_t)FLAGS_test_seconds * 1000000u) {
+                sender->_stop = true;
+                break;
+            }
+
+            int current = sender->_inflight.load(butil::memory_order_relaxed);
+            if (current < FLAGS_max_inflight) {
+                if (!sender->SendRequest()) {
+                    break;
+                }
+            } else {
+                bthread_usleep(100);
+            }
         }
 
         return NULL;
@@ -204,10 +203,9 @@ private:
     int _channel_idx = 0;
     static int _next_server;
     volatile bool _stop;
-    int _inflight;
-    uint64_t _total_sent;
-    uint64_t _total_error;
-    uint64_t _total_overcrowded;
+    butil::atomic<int> _inflight;
+    butil::atomic<uint64_t> _total_error;
+    butil::atomic<uint64_t> _total_overcrowded;
 };
 
 int ExtremeSender::_next_server = 0;
@@ -216,6 +214,7 @@ void RunTest() {
     std::cout << "=== Extreme Concurrency Benchmark ===" << std::endl;
     std::cout << "[Threads: " << FLAGS_thread_num
         << ", Channels/thread: " << FLAGS_channel_per_thread
+        << ", MaxInflight/thread: " << FLAGS_max_inflight
         << ", Attachment: " << FLAGS_attachment_size << "B"
         << ", Connection: " << FLAGS_connection_type
         << ", RDMA: " << (FLAGS_use_rdma ? "yes" : "no")
@@ -246,11 +245,11 @@ void RunTest() {
     for (int sec = 0; sec < FLAGS_test_seconds; ++sec) {
         bthread_usleep(1000000);
         uint64_t now = butil::gettimeofday_us();
-        uint64_t elapsed_ms = (now - start_time) / 1000;
+        uint64_t elapsed_us = now - start_time;
         uint64_t cnt = g_total_cnt.get_value();
         uint64_t bytes = g_total_bytes.get_value();
-        double qps = (elapsed_ms > 0) ? (double)cnt * 1000 / elapsed_ms : 0;
-        double throughput_mb = (elapsed_ms > 0) ? (double)bytes / 1.048576 / elapsed_ms : 0;
+        double qps = (elapsed_us > 0) ? (double)cnt * 1000000 / elapsed_us : 0;
+        double throughput_mb = (elapsed_us > 0) ? (double)bytes / 1.048576 / elapsed_us : 0;
         int total_inflight = 0;
         for (auto* s : senders) total_inflight += s->inflight();
 
@@ -264,11 +263,15 @@ void RunTest() {
     }
 
     g_stop = true;
-    for (auto* s : senders) {
-        while (!s->IsStop()) {
-            bthread_usleep(1000);
-        }
+
+    for (int i = 0; i < 100; ++i) {
+        int total_inflight = 0;
+        for (auto* s : senders) total_inflight += s->inflight();
+        if (total_inflight == 0) break;
+        bthread_usleep(10000);
     }
+
+    for (auto* s : senders) s->_stop = true;
 
     uint64_t end_time = butil::gettimeofday_us();
     double elapsed_s = (end_time - start_time) / 1000000.0;
