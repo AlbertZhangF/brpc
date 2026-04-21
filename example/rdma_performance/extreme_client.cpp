@@ -18,7 +18,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <vector>
-#include <signal.h>
 #include <gflags/gflags.h>
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
@@ -44,9 +43,8 @@ DEFINE_bool(use_rdma, false, "Use RDMA or not");
 DEFINE_int32(rpc_timeout_ms, 5000, "RPC call timeout");
 DEFINE_int32(test_seconds, 10, "Test duration in seconds");
 DEFINE_int32(dummy_port, 8001, "Dummy server port");
-DEFINE_int32(channel_per_thread, 1, "Number of channels per sender thread");
 DEFINE_bool(ignore_eovercrowded, false, "Ignore EOVERCROWDED errors");
-DEFINE_int32(max_inflight, 1000,
+DEFINE_int32(max_inflight, 256,
              "Max inflight requests per sender thread");
 
 bvar::LatencyRecorder g_latency_recorder("extreme_client");
@@ -60,186 +58,145 @@ bvar::Adder<uint64_t> g_overcrowded_cnt("extreme_overcrowded_cnt");
 butil::atomic<uint64_t> g_last_cpu_time(0);
 std::vector<std::string> g_servers;
 volatile bool g_stop = false;
+brpc::Channel* g_shared_channel = nullptr;
 
-class ExtremeSender {
-public:
-    ExtremeSender(int attachment_size, bool echo_attachment, int channel_count)
-        : _attachment_size(attachment_size)
-        , _echo_attachment(echo_attachment)
-        , _stop(false)
-        , _inflight(0)
-        , _total_error(0)
-        , _total_overcrowded(0)
-    {
-        if (attachment_size > 0) {
-            _addr = malloc(attachment_size);
-            butil::fast_rand_bytes(_addr, attachment_size);
-            _attachment.append(_addr, attachment_size);
-        }
-
-        for (int i = 0; i < channel_count; ++i) {
-            brpc::ChannelOptions options;
-            options.use_rdma = FLAGS_use_rdma;
-            options.protocol = FLAGS_protocol;
-            options.connection_type = FLAGS_connection_type;
-            options.timeout_ms = FLAGS_rpc_timeout_ms;
-            options.max_retry = 0;
-
-            std::string server = g_servers[(_next_server++) % g_servers.size()];
-            brpc::Channel* ch = new brpc::Channel();
-            if (ch->Init(server.c_str(), &options) != 0) {
-                LOG(ERROR) << "Fail to init channel to " << server;
-                delete ch;
-                continue;
-            }
-            _channels.push_back(ch);
-        }
-    }
-
-    ~ExtremeSender() {
-        if (_addr) free(_addr);
-        for (auto* ch : _channels) delete ch;
-    }
-
-    inline bool IsStop() const { return _stop; }
-    inline void SetStop(bool stop) { _stop = stop; }
-    inline int inflight() const { return _inflight.load(butil::memory_order_relaxed); }
-    inline uint64_t total_error() const { return _total_error.load(butil::memory_order_relaxed); }
-    inline uint64_t total_overcrowded() const { return _total_overcrowded.load(butil::memory_order_relaxed); }
-
-    bool Warmup() {
-        if (_channels.empty()) return false;
-        for (auto* ch : _channels) {
-            brpc::Controller cntl;
-            test::PerfTestResponse resp;
-            test::PerfTestRequest req;
-            req.set_echo_attachment(_echo_attachment);
-            test::PerfTestService_Stub stub(ch);
-            stub.Test(&cntl, &req, &resp, NULL);
-            if (cntl.Failed()) {
-                LOG(ERROR) << "Warmup failed: " << cntl.ErrorText();
-                return false;
-            }
-        }
-        return true;
-    }
-
-    struct RespClosure {
-        brpc::Controller* cntl;
-        test::PerfTestResponse* resp;
-        ExtremeSender* sender;
-    };
-
-    bool SendRequest() {
-        if (_stop || _channels.empty()) return false;
-
-        brpc::Channel* ch = _channels[_channel_idx++ % _channels.size()];
-
-        RespClosure* closure = new RespClosure;
-        test::PerfTestRequest request;
-        closure->resp = new test::PerfTestResponse();
-        closure->cntl = new brpc::Controller();
-        if (FLAGS_ignore_eovercrowded) {
-            closure->cntl->ignore_eovercrowded();
-        }
-        request.set_echo_attachment(_echo_attachment);
-        closure->cntl->request_attachment().append(_attachment);
-        closure->sender = this;
-        _inflight.fetch_add(1, butil::memory_order_relaxed);
-
-        google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
-        test::PerfTestService_Stub stub(ch);
-        stub.Test(closure->cntl, &request, closure->resp, done);
-        return true;
-    }
-
-    static void HandleResponse(RespClosure* closure) {
-        std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
-        std::unique_ptr<test::PerfTestResponse> resp_guard(closure->resp);
-        ExtremeSender* sender = closure->sender;
-        sender->_inflight.fetch_sub(1, butil::memory_order_relaxed);
-
-        if (closure->cntl->Failed()) {
-            ++sender->_total_error;
-            g_error_cnt << 1;
-            if (closure->cntl->ErrorCode() == brpc::EOVERCROWDED) {
-                ++sender->_total_overcrowded;
-                g_overcrowded_cnt << 1;
-            }
-            return;
-        }
-
-        g_latency_recorder << closure->cntl->latency_us();
-        if (closure->resp->cpu_usage().size() > 0) {
-            g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
-        }
-        g_total_bytes << closure->cntl->request_attachment().size();
-        g_total_cnt << 1;
-
-        cntl_guard.reset(NULL);
-        resp_guard.reset(NULL);
-
-        uint64_t now = butil::gettimeofday_us();
-        uint64_t last = g_last_cpu_time.load(butil::memory_order_relaxed);
-        if (now > last && now - last > 100000) {
-            if (g_last_cpu_time.exchange(now, butil::memory_order_relaxed) == last) {
-                g_client_cpu_recorder <<
-                    atof(bvar::Variable::describe_exposed("process_cpu_usage").c_str()) * 100;
-            }
-        }
-    }
-
-    static void* RunSender(void* arg) {
-        ExtremeSender* sender = (ExtremeSender*)arg;
-        uint64_t start_time = butil::gettimeofday_us();
-
-        while (!g_stop) {
-            uint64_t now = butil::gettimeofday_us();
-            if (now - start_time > (uint64_t)FLAGS_test_seconds * 1000000u) {
-                sender->_stop = true;
-                break;
-            }
-
-            int current = sender->_inflight.load(butil::memory_order_relaxed);
-            if (current < FLAGS_max_inflight) {
-                if (!sender->SendRequest()) {
-                    break;
-                }
-            } else {
-                bthread_usleep(100);
-            }
-        }
-
-        return NULL;
-    }
-
-private:
-    void* _addr = nullptr;
-    butil::IOBuf _attachment;
-    int _attachment_size;
-    bool _echo_attachment;
-    std::vector<brpc::Channel*> _channels;
-    int _channel_idx = 0;
-    static int _next_server;
-    volatile bool _stop;
-    butil::atomic<int> _inflight;
-    butil::atomic<uint64_t> _total_error;
-    butil::atomic<uint64_t> _total_overcrowded;
+struct RespClosure {
+    brpc::Controller* cntl;
+    test::PerfTestResponse* resp;
 };
 
-int ExtremeSender::_next_server = 0;
+void HandleResponse(RespClosure* closure) {
+    std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
+    std::unique_ptr<test::PerfTestResponse> resp_guard(closure->resp);
 
-void RunTest() {
-    int effective_channels = FLAGS_channel_per_thread;
-    if (FLAGS_connection_type == "pooled" && FLAGS_channel_per_thread > 1) {
-        effective_channels = 1;
-        std::cout << "NOTE: pooled mode uses 1 channel/thread (connection pool handles concurrency)" << std::endl;
+    if (closure->cntl->Failed()) {
+        g_error_cnt << 1;
+        if (closure->cntl->ErrorCode() == brpc::EOVERCROWDED) {
+            g_overcrowded_cnt << 1;
+        }
+        delete closure;
+        return;
     }
 
+    g_latency_recorder << closure->cntl->latency_us();
+    if (closure->resp->cpu_usage().size() > 0) {
+        g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
+    }
+    g_total_bytes << closure->cntl->request_attachment().size();
+    g_total_cnt << 1;
+
+    uint64_t now = butil::gettimeofday_us();
+    uint64_t last = g_last_cpu_time.load(butil::memory_order_relaxed);
+    if (now > last && now - last > 100000) {
+        if (g_last_cpu_time.exchange(now, butil::memory_order_relaxed) == last) {
+            g_client_cpu_recorder <<
+                atof(bvar::Variable::describe_exposed("process_cpu_usage").c_str()) * 100;
+        }
+    }
+
+    delete closure;
+}
+
+butil::atomic<int> g_inflight(0);
+
+bool SendRequest(butil::IOBuf& attachment, bool echo_attachment) {
+    if (g_stop || !g_shared_channel) return false;
+
+    RespClosure* closure = new RespClosure;
+    test::PerfTestRequest request;
+    closure->resp = new test::PerfTestResponse();
+    closure->cntl = new brpc::Controller();
+    if (FLAGS_ignore_eovercrowded) {
+        closure->cntl->ignore_eovercrowded();
+    }
+    request.set_echo_attachment(echo_attachment);
+    closure->cntl->request_attachment().append(attachment);
+    g_inflight.fetch_add(1, butil::memory_order_relaxed);
+
+    google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
+    test::PerfTestService_Stub stub(g_shared_channel);
+    stub.Test(closure->cntl, &request, closure->resp, done);
+    return true;
+}
+
+void HandleResponseForInflight(RespClosure* closure) {
+    std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
+    std::unique_ptr<test::PerfTestResponse> resp_guard(closure->resp);
+    g_inflight.fetch_sub(1, butil::memory_order_relaxed);
+
+    if (closure->cntl->Failed()) {
+        g_error_cnt << 1;
+        if (closure->cntl->ErrorCode() == brpc::EOVERCROWDED) {
+            g_overcrowded_cnt << 1;
+        }
+        delete closure;
+        return;
+    }
+
+    g_latency_recorder << closure->cntl->latency_us();
+    if (closure->resp->cpu_usage().size() > 0) {
+        g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
+    }
+    g_total_bytes << closure->cntl->request_attachment().size();
+    g_total_cnt << 1;
+
+    uint64_t now = butil::gettimeofday_us();
+    uint64_t last = g_last_cpu_time.load(butil::memory_order_relaxed);
+    if (now > last && now - last > 100000) {
+        if (g_last_cpu_time.exchange(now, butil::memory_order_relaxed) == last) {
+            g_client_cpu_recorder <<
+                atof(bvar::Variable::describe_exposed("process_cpu_usage").c_str()) * 100;
+        }
+    }
+
+    delete closure;
+}
+
+struct SenderArg {
+    butil::IOBuf attachment;
+    bool echo_attachment;
+};
+
+static void* RunSender(void* arg) {
+    SenderArg* sa = (SenderArg*)arg;
+    uint64_t start_time = butil::gettimeofday_us();
+
+    while (!g_stop) {
+        uint64_t now = butil::gettimeofday_us();
+        if (now - start_time > (uint64_t)FLAGS_test_seconds * 1000000u) {
+            break;
+        }
+
+        int current = g_inflight.load(butil::memory_order_relaxed);
+        if (current < FLAGS_max_inflight) {
+            if (g_stop || !g_shared_channel) break;
+
+            RespClosure* closure = new RespClosure;
+            test::PerfTestRequest request;
+            closure->resp = new test::PerfTestResponse();
+            closure->cntl = new brpc::Controller();
+            if (FLAGS_ignore_eovercrowded) {
+                closure->cntl->ignore_eovercrowded();
+            }
+            request.set_echo_attachment(sa->echo_attachment);
+            closure->cntl->request_attachment().append(sa->attachment);
+            g_inflight.fetch_add(1, butil::memory_order_relaxed);
+
+            google::protobuf::Closure* done = brpc::NewCallback(&HandleResponseForInflight, closure);
+            test::PerfTestService_Stub stub(g_shared_channel);
+            stub.Test(closure->cntl, &request, closure->resp, done);
+        } else {
+            bthread_usleep(100);
+        }
+    }
+
+    return NULL;
+}
+
+void RunTest() {
     std::cout << "=== Extreme Concurrency Benchmark ===" << std::endl;
     std::cout << "[Threads: " << FLAGS_thread_num
-        << ", Channels/thread: " << effective_channels
-        << ", MaxInflight/thread: " << FLAGS_max_inflight
+        << ", MaxInflight: " << FLAGS_max_inflight
         << ", Attachment: " << FLAGS_attachment_size << "B"
         << ", Connection: " << FLAGS_connection_type
         << ", RDMA: " << (FLAGS_use_rdma ? "yes" : "no")
@@ -247,37 +204,48 @@ void RunTest() {
         << ", IgnoreOvercrowded: " << (FLAGS_ignore_eovercrowded ? "yes" : "no")
         << "]" << std::endl;
 
-    std::vector<ExtremeSender*> senders;
-    for (int i = 0; i < FLAGS_thread_num; ++i) {
-        ExtremeSender* s = new ExtremeSender(
-            FLAGS_attachment_size, FLAGS_echo_attachment, effective_channels);
-        if (s->IsStop()) {
-            LOG(ERROR) << "Sender " << i << " init failed";
-            delete s;
-            exit(1);
-        }
-        senders.push_back(s);
+    brpc::ChannelOptions options;
+    options.use_rdma = FLAGS_use_rdma;
+    options.protocol = FLAGS_protocol;
+    options.connection_type = FLAGS_connection_type;
+    options.timeout_ms = FLAGS_rpc_timeout_ms;
+    options.max_retry = 0;
+
+    g_shared_channel = new brpc::Channel();
+    std::string server = g_servers[0];
+    if (g_shared_channel->Init(server.c_str(), &options) != 0) {
+        LOG(ERROR) << "Fail to init channel to " << server;
+        _exit(1);
     }
 
-    std::cout << "Warming up connections..." << std::endl;
-    for (size_t i = 0; i < senders.size(); ++i) {
-        if (!senders[i]->Warmup()) {
-            LOG(ERROR) << "Sender " << i << " warmup failed";
-            for (auto* s : senders) delete s;
-            exit(1);
-        }
-        if (i % 4 == 3) {
-            bthread_usleep(50000);
+    {
+        brpc::Controller cntl;
+        test::PerfTestResponse resp;
+        test::PerfTestRequest req;
+        test::PerfTestService_Stub stub(g_shared_channel);
+        stub.Test(&cntl, &req, &resp, NULL);
+        if (cntl.Failed()) {
+            LOG(ERROR) << "Warmup failed: " << cntl.ErrorText();
+            _exit(1);
         }
     }
     std::cout << "Warmup done." << std::endl;
+
+    SenderArg sa;
+    if (FLAGS_attachment_size > 0) {
+        void* addr = malloc(FLAGS_attachment_size);
+        butil::fast_rand_bytes(addr, FLAGS_attachment_size);
+        sa.attachment.append(addr, FLAGS_attachment_size);
+        free(addr);
+    }
+    sa.echo_attachment = FLAGS_echo_attachment;
 
     uint64_t start_time = butil::gettimeofday_us();
 
     std::vector<bthread_t> tids(FLAGS_thread_num);
     for (int i = 0; i < FLAGS_thread_num; ++i) {
         bthread_start_background(&tids[i], &BTHREAD_ATTR_NORMAL,
-                ExtremeSender::RunSender, senders[i]);
+                RunSender, &sa);
     }
 
     for (int sec = 0; sec < FLAGS_test_seconds; ++sec) {
@@ -288,8 +256,7 @@ void RunTest() {
         uint64_t bytes = g_total_bytes.get_value();
         double qps = (elapsed_us > 0) ? (double)cnt * 1000000 / elapsed_us : 0;
         double throughput_mb = (elapsed_us > 0) ? (double)bytes / 1.048576 / elapsed_us : 0;
-        int total_inflight = 0;
-        for (auto* s : senders) total_inflight += s->inflight();
+        int total_inflight = g_inflight.load(butil::memory_order_relaxed);
 
         std::cout << "[" << (sec + 1) << "s] "
             << "QPS: " << (uint64_t)qps
@@ -302,18 +269,11 @@ void RunTest() {
 
     g_stop = true;
 
-    for (int i = 0; i < 100; ++i) {
-        int total_inflight = 0;
-        for (auto* s : senders) total_inflight += s->inflight();
+    for (int i = 0; i < 200; ++i) {
+        int total_inflight = g_inflight.load(butil::memory_order_relaxed);
         if (total_inflight == 0) break;
         bthread_usleep(10000);
     }
-
-    for (auto* s : senders) s->SetStop(true);
-
-    bthread_usleep(100000);
-
-    for (auto* s : senders) delete s;
 
     uint64_t end_time = butil::gettimeofday_us();
     double elapsed_s = (end_time - start_time) / 1000000.0;
@@ -340,8 +300,9 @@ void RunTest() {
     if (total_overcrowded > 0) {
         std::cout << "\n*** EOVERCROWDED detected! Socket write buffer overflow. ***" << std::endl;
         std::cout << "Try: --ignore_eovercrowded=true --socket_max_unwritten_bytes=268435456" << std::endl;
-        std::cout << "Or:  --connection_type=pooled" << std::endl;
     }
+
+    delete g_shared_channel;
 }
 
 int main(int argc, char* argv[]) {
