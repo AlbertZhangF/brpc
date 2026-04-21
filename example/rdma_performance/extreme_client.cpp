@@ -45,7 +45,6 @@ DEFINE_int32(test_seconds, 10, "Test duration in seconds");
 DEFINE_int32(dummy_port, 8001, "Dummy server port");
 DEFINE_int32(channel_per_thread, 1, "Number of channels per sender thread");
 DEFINE_bool(ignore_eovercrowded, false, "Ignore EOVERCROWDED errors");
-DECLARE_int64(socket_max_unwritten_bytes);
 
 bvar::LatencyRecorder g_latency_recorder("extreme_client");
 bvar::LatencyRecorder g_server_cpu_recorder("extreme_server_cpu");
@@ -223,11 +222,6 @@ void RunTest() {
         << ", Echo: " << (FLAGS_echo_attachment ? "yes" : "no")
         << ", IgnoreOvercrowded: " << (FLAGS_ignore_eovercrowded ? "yes" : "no")
         << "]" << std::endl;
-
-    if (FLAGS_socket_max_unwritten_bytes != 64 * 1024 * 1024) {
-        std::cout << "[socket_max_unwritten_bytes set to "
-                  << FLAGS_socket_max_unwritten_bytes << "]" << std::endl;
-    }
 
     std::vector<ExtremeSender*> senders;
     for (int i = 0; i < FLAGS_thread_num; ++i) {
