@@ -106,6 +106,23 @@ public:
     inline uint64_t total_error() const { return _total_error.load(butil::memory_order_relaxed); }
     inline uint64_t total_overcrowded() const { return _total_overcrowded.load(butil::memory_order_relaxed); }
 
+    bool Warmup() {
+        if (_channels.empty()) return false;
+        for (auto* ch : _channels) {
+            brpc::Controller cntl;
+            test::PerfTestResponse resp;
+            test::PerfTestRequest req;
+            req.set_echo_attachment(_echo_attachment);
+            test::PerfTestService_Stub stub(ch);
+            stub.Test(&cntl, &req, &resp, NULL);
+            if (cntl.Failed()) {
+                LOG(ERROR) << "Warmup failed: " << cntl.ErrorText();
+                return false;
+            }
+        }
+        return true;
+    }
+
     struct RespClosure {
         brpc::Controller* cntl;
         test::PerfTestResponse* resp;
@@ -234,6 +251,19 @@ void RunTest() {
         }
         senders.push_back(s);
     }
+
+    std::cout << "Warming up connections..." << std::endl;
+    for (size_t i = 0; i < senders.size(); ++i) {
+        if (!senders[i]->Warmup()) {
+            LOG(ERROR) << "Sender " << i << " warmup failed";
+            for (auto* s : senders) delete s;
+            exit(1);
+        }
+        if (i % 4 == 3) {
+            bthread_usleep(50000);
+        }
+    }
+    std::cout << "Warmup done." << std::endl;
 
     uint64_t start_time = butil::gettimeofday_us();
 
