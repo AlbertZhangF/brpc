@@ -222,6 +222,7 @@ void RunTest() {
         brpc::Controller cntl;
         test::PerfTestResponse resp;
         test::PerfTestRequest req;
+        req.set_echo_attachment(FLAGS_echo_attachment);
         test::PerfTestService_Stub stub(g_shared_channel);
         stub.Test(&cntl, &req, &resp, NULL);
         if (cntl.Failed()) {
