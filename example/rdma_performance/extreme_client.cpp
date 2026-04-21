@@ -101,6 +101,7 @@ public:
     }
 
     inline bool IsStop() const { return _stop; }
+    inline void SetStop(bool stop) { _stop = stop; }
     inline int inflight() const { return _inflight.load(butil::memory_order_relaxed); }
     inline uint64_t total_error() const { return _total_error.load(butil::memory_order_relaxed); }
     inline uint64_t total_overcrowded() const { return _total_overcrowded.load(butil::memory_order_relaxed); }
@@ -271,7 +272,7 @@ void RunTest() {
         bthread_usleep(10000);
     }
 
-    for (auto* s : senders) s->_stop = true;
+    for (auto* s : senders) s->SetStop(true);
 
     uint64_t end_time = butil::gettimeofday_us();
     double elapsed_s = (end_time - start_time) / 1000000.0;
