@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <vector>
+#include <signal.h>
 #include <gflags/gflags.h>
 #include "butil/atomicops.h"
 #include "butil/fast_rand.h"
@@ -362,7 +363,8 @@ int main(int argc, char* argv[]) {
     g_servers.push_back(FLAGS_servers.substr(pos1));
 
     RunTest();
-    return 0;
+
+    _exit(0);
 }
 
 #else
