@@ -229,9 +229,15 @@ private:
 int ExtremeSender::_next_server = 0;
 
 void RunTest() {
+    int effective_channels = FLAGS_channel_per_thread;
+    if (FLAGS_connection_type == "pooled" && FLAGS_channel_per_thread > 1) {
+        effective_channels = 1;
+        std::cout << "NOTE: pooled mode uses 1 channel/thread (connection pool handles concurrency)" << std::endl;
+    }
+
     std::cout << "=== Extreme Concurrency Benchmark ===" << std::endl;
     std::cout << "[Threads: " << FLAGS_thread_num
-        << ", Channels/thread: " << FLAGS_channel_per_thread
+        << ", Channels/thread: " << effective_channels
         << ", MaxInflight/thread: " << FLAGS_max_inflight
         << ", Attachment: " << FLAGS_attachment_size << "B"
         << ", Connection: " << FLAGS_connection_type
@@ -243,7 +249,7 @@ void RunTest() {
     std::vector<ExtremeSender*> senders;
     for (int i = 0; i < FLAGS_thread_num; ++i) {
         ExtremeSender* s = new ExtremeSender(
-            FLAGS_attachment_size, FLAGS_echo_attachment, FLAGS_channel_per_thread);
+            FLAGS_attachment_size, FLAGS_echo_attachment, effective_channels);
         if (s->IsStop()) {
             LOG(ERROR) << "Sender " << i << " init failed";
             delete s;
@@ -304,6 +310,10 @@ void RunTest() {
 
     for (auto* s : senders) s->SetStop(true);
 
+    bthread_usleep(100000);
+
+    for (auto* s : senders) delete s;
+
     uint64_t end_time = butil::gettimeofday_us();
     double elapsed_s = (end_time - start_time) / 1000000.0;
 
@@ -331,8 +341,6 @@ void RunTest() {
         std::cout << "Try: --ignore_eovercrowded=true --socket_max_unwritten_bytes=268435456" << std::endl;
         std::cout << "Or:  --connection_type=pooled" << std::endl;
     }
-
-    for (auto* s : senders) delete s;
 }
 
 int main(int argc, char* argv[]) {
