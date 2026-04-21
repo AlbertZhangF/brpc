@@ -123,7 +123,7 @@ public:
         closure->resp = new test::PerfTestResponse();
         closure->cntl = new brpc::Controller();
         if (FLAGS_ignore_eovercrowded) {
-            closure->cntl->set_flags(brpc::FLAGS_IGNORE_EOVERCROWDED);
+            closure->cntl->ignore_eovercrowded();
         }
         request.set_echo_attachment(_echo_attachment);
         closure->cntl->request_attachment().append(_attachment);
