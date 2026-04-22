@@ -185,8 +185,7 @@ public:
                 test->_stop = true;
             } else if (ctx->cntl.ErrorCode() != brpc::ELOGOFF &&
                        ctx->cntl.ErrorCode() != brpc::ERPCTIMEDOUT &&
-                       ctx->cntl.ErrorCode() != brpc::EHOSTDOWN &&
-                       ctx->cntl.ErrorCode() != brpc::ECONNECT) {
+                       ctx->cntl.ErrorCode() != brpc::EFAILEDSOCKET) {
                 LOG(WARNING) << "RPC call failed: " << ctx->cntl.ErrorText()
                              << " (consecutive_errors=" << errors << ")";
             }
