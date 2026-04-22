@@ -75,6 +75,7 @@ std::vector<brpc::Channel*> g_channels;
 butil::atomic<int> g_channel_counter(0);
 butil::atomic<int> g_total_inflight(0);
 int g_max_total_inflight = 0;
+butil::atomic<bool> g_conn_down(false);
 
 butil::atomic<int64_t> g_token(10000);
 
@@ -129,6 +130,10 @@ public:
 
     bool SendRequest() {
         if (_stop) return false;
+
+        if (g_conn_down.load(butil::memory_order_acquire)) {
+            return false;
+        }
 
         if (FLAGS_test_iterations > 0) {
             if (_remaining_iterations.fetch_sub(1, butil::memory_order_relaxed) <= 0) {
@@ -201,17 +206,27 @@ public:
 
         if (ctx->cntl.Failed()) {
             g_error_cnt.fetch_add(1, butil::memory_order_relaxed);
-            int errors = test->_consecutive_errors.fetch_add(1, butil::memory_order_relaxed) + 1;
-            if (errors >= MAX_CONSECUTIVE_ERRORS) {
-                LOG(ERROR) << "Too many consecutive errors (" << errors << "), stopping. Last error: "
-                           << ctx->cntl.ErrorText();
+
+            if (ctx->cntl.ErrorCode() == EHOSTDOWN ||
+                ctx->cntl.ErrorCode() == brpc::EFAILEDSOCKET) {
+                if (!g_conn_down.load(butil::memory_order_relaxed)) {
+                    g_conn_down.store(true, butil::memory_order_release);
+                    LOG(WARNING) << "Connection down, backing off... (" << ctx->cntl.ErrorText() << ")";
+                }
+            } else if (ctx->cntl.ErrorCode() == brpc::ERPCTIMEDOUT) {
+                // timeout is expected under high load, just count
+            } else if (ctx->cntl.ErrorCode() == brpc::ELOGOFF) {
                 test->_stop = true;
-            } else if (ctx->cntl.ErrorCode() != brpc::ELOGOFF &&
-                       ctx->cntl.ErrorCode() != brpc::ERPCTIMEDOUT &&
-                       ctx->cntl.ErrorCode() != brpc::EFAILEDSOCKET) {
-                LOG(WARNING) << "RPC call failed: " << ctx->cntl.ErrorText()
-                             << " (consecutive_errors=" << errors << ")";
+                LOG(ERROR) << "Server is stopping: " << ctx->cntl.ErrorText();
+            } else {
+                int errors = test->_consecutive_errors.fetch_add(1, butil::memory_order_relaxed) + 1;
+                if (errors >= MAX_CONSECUTIVE_ERRORS) {
+                    LOG(ERROR) << "Too many consecutive errors (" << errors << "), stopping. Last error: "
+                               << ctx->cntl.ErrorText();
+                    test->_stop = true;
+                }
             }
+
             delete ctx;
             test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
             g_total_inflight.fetch_sub(1, butil::memory_order_relaxed);
@@ -219,6 +234,10 @@ public:
         }
 
         test->_consecutive_errors.store(0, butil::memory_order_relaxed);
+        if (g_conn_down.load(butil::memory_order_relaxed)) {
+            g_conn_down.store(false, butil::memory_order_release);
+            LOG(INFO) << "Connection recovered";
+        }
 
         g_latency_recorder << ctx->cntl.latency_us();
         if (ctx->resp.cpu_usage().size() > 0) {
@@ -261,7 +280,11 @@ public:
 
         while (!test->_stop) {
             if (!test->SendRequest()) {
-                bthread_usleep(1);
+                if (g_conn_down.load(butil::memory_order_acquire)) {
+                    bthread_usleep(10000);
+                } else {
+                    bthread_usleep(1);
+                }
             }
         }
 
