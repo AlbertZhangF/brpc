@@ -1052,6 +1052,8 @@ static RdmaResource* AllocateQpCq(uint16_t sq_size, uint16_t rq_size) {
         return NULL;
     }
 
+    int cq_size = sq_size + rq_size;
+
     if (!FLAGS_rdma_use_polling) {
         res->comp_channel = IbvCreateCompChannel(GetRdmaContext());
         if (!res->comp_channel) {
@@ -1067,7 +1069,7 @@ static RdmaResource* AllocateQpCq(uint16_t sq_size, uint16_t rq_size) {
             return NULL;
         }
 
-        res->cq = IbvCreateCq(GetRdmaContext(), 2 * FLAGS_rdma_prepared_qp_size,
+        res->cq = IbvCreateCq(GetRdmaContext(), cq_size,
                               NULL, res->comp_channel, GetRdmaCompVector());
         if (!res->cq) {
             PLOG(WARNING) << "Fail to create CQ";
@@ -1075,7 +1077,7 @@ static RdmaResource* AllocateQpCq(uint16_t sq_size, uint16_t rq_size) {
             return NULL;
         }
     } else {
-        res->cq = IbvCreateCq(GetRdmaContext(), 2 * FLAGS_rdma_prepared_qp_size,
+        res->cq = IbvCreateCq(GetRdmaContext(), cq_size,
                               NULL, NULL, 0);
         if (!res->cq) {
             PLOG(WARNING) << "Fail to create CQ";

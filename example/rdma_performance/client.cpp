@@ -33,19 +33,29 @@
 #ifdef BRPC_WITH_RDMA
 
 DEFINE_int32(thread_num, 0, "How many threads are used");
-DEFINE_int32(queue_depth, 1, "How many requests can be pending in the queue");
-DEFINE_int32(expected_qps, 0, "The expected QPS");
+DEFINE_int32(queue_depth, 64, "How many requests can be pending per thread");
+DEFINE_int32(expected_qps, 0, "The expected QPS (0 means unlimited)");
 DEFINE_int32(max_thread_num, 16, "The max number of threads are used");
 DEFINE_int32(attachment_size, -1, "Attachment size is used (in Bytes)");
 DEFINE_bool(echo_attachment, false, "Select whether attachment should be echo");
-DEFINE_string(connection_type, "single", "Connection type of the channel");
+DEFINE_string(connection_type, "pooled", "Connection type of the channel");
 DEFINE_string(protocol, "baidu_std", "Protocol type.");
-DEFINE_string(servers, "0.0.0.0:8002+0.0.0.0:8002", "IP Address of servers");
-DEFINE_bool(use_rdma, true, "Use RDMA or not");
-DEFINE_int32(rpc_timeout_ms, 2000, "RPC call timeout");
+DEFINE_string(servers, "0.0.0.0:8002", "IP Address of servers");
+DEFINE_bool(use_rdma, false, "Use RDMA or not");
+DEFINE_int32(rpc_timeout_ms, 5000, "RPC call timeout");
 DEFINE_int32(test_seconds, 20, "Test running time");
 DEFINE_int32(test_iterations, 0, "Test iterations");
 DEFINE_int32(dummy_port, 8001, "Dummy server port number");
+DEFINE_int32(perf_rdma_sq_size, 1024, "RDMA SQ size for this test");
+DEFINE_int32(perf_rdma_rq_size, 1024, "RDMA RQ size for this test");
+DEFINE_bool(perf_rdma_use_polling, true, "Use RDMA polling mode for this test");
+DEFINE_int32(perf_rdma_poller_num, 4, "Number of RDMA polling threads for this test");
+DEFINE_int32(perf_rdma_cqe_poll_once, 64, "Max CQEs polled per CQ poll for this test");
+DEFINE_int32(channel_num, 0, "Number of channels per thread (0=auto)");
+DEFINE_int32(perf_max_conn_pool_size, 1000, "Max pooled connections per endpoint");
+DEFINE_int32(perf_socket_recv_buf, -1, "Socket recv buffer size (-1=system default)");
+DEFINE_int32(perf_socket_send_buf, -1, "Socket send buffer size (-1=system default)");
+DEFINE_int32(perf_bthread_concurrency, 0, "bthread worker concurrency (0=auto)");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -53,8 +63,9 @@ bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
 butil::atomic<uint64_t> g_last_time(0);
 butil::atomic<uint64_t> g_total_bytes;
 butil::atomic<uint64_t> g_total_cnt;
+butil::atomic<uint64_t> g_error_cnt;
 std::vector<std::string> g_servers;
-int rr_index = 0;
+butil::atomic<int> g_rr_index(0);
 volatile bool g_stop = false;
 
 butil::atomic<int64_t> g_token(10000);
@@ -74,129 +85,167 @@ static void* GenerateToken(void* arg) {
     return NULL;
 }
 
+class PerformanceTest;
+
+struct RequestContext {
+    brpc::Controller cntl;
+    test::PerfTestResponse resp;
+    PerformanceTest* test;
+    int channel_index;
+};
+
 class PerformanceTest {
 public:
-    PerformanceTest(int attachment_size, bool echo_attachment)
+    PerformanceTest(int attachment_size, bool echo_attachment, int num_channels)
         : _addr(NULL)
-        , _channel(NULL)
         , _start_time(0)
         , _iterations(0)
         , _stop(false)
+        , _inflight(0)
+        , _echo_attachment(echo_attachment)
+        , _num_channels(num_channels)
+        , _channel_counter(0)
     {
         if (attachment_size > 0) {
             _addr = malloc(attachment_size);
             butil::fast_rand_bytes(_addr, attachment_size);
             _attachment.append(_addr, attachment_size);
         }
-        _echo_attachment = echo_attachment;
+        _channels.resize(_num_channels, NULL);
     }
 
     ~PerformanceTest() {
+        for (int i = 0; i < _num_channels; ++i) {
+            delete _channels[i];
+        }
         if (_addr) {
             free(_addr);
         }
-        delete _channel;
     }
 
     inline bool IsStop() { return _stop; }
 
     int Init() {
-        brpc::ChannelOptions options;
-        options.use_rdma = FLAGS_use_rdma;
-        options.protocol = FLAGS_protocol;
-        options.connection_type = FLAGS_connection_type;
-        options.timeout_ms = FLAGS_rpc_timeout_ms;
-        options.max_retry = 0;
-        std::string server = g_servers[(rr_index++) % g_servers.size()];
-        _channel = new brpc::Channel();
-        if (_channel->Init(server.c_str(), &options) != 0) {
-            LOG(ERROR) << "Fail to initialize channel";
-            return -1;
+        for (int i = 0; i < _num_channels; ++i) {
+            brpc::ChannelOptions options;
+            options.use_rdma = FLAGS_use_rdma;
+            options.protocol = FLAGS_protocol;
+            options.connection_type = FLAGS_connection_type;
+            options.timeout_ms = FLAGS_rpc_timeout_ms;
+            options.max_retry = 0;
+            int server_idx = g_rr_index.fetch_add(1, butil::memory_order_relaxed) % g_servers.size();
+            std::string server = g_servers[server_idx];
+            _channels[i] = new brpc::Channel();
+            if (_channels[i]->Init(server.c_str(), &options) != 0) {
+                LOG(ERROR) << "Fail to initialize channel " << i;
+                return -1;
+            }
         }
-        brpc::Controller cntl;
-        test::PerfTestResponse response;
-        test::PerfTestRequest request;
-        request.set_echo_attachment(_echo_attachment);
-        test::PerfTestService_Stub stub(_channel);
-        stub.Test(&cntl, &request, &response, NULL);
-        if (cntl.Failed()) {
-            LOG(ERROR) << "RPC call failed: " << cntl.ErrorText();
-            return -1;
+        {
+            brpc::Controller cntl;
+            test::PerfTestResponse response;
+            test::PerfTestRequest request;
+            request.set_echo_attachment(_echo_attachment);
+            test::PerfTestService_Stub stub(_channels[0]);
+            stub.Test(&cntl, &request, &response, NULL);
+            if (cntl.Failed()) {
+                LOG(ERROR) << "RPC call failed: " << cntl.ErrorText();
+                return -1;
+            }
         }
         return 0;
     }
 
-    struct RespClosure {
-        brpc::Controller* cntl;
-        test::PerfTestResponse* resp;
-        PerformanceTest* test;
-    };
-
     void SendRequest() {
+        if (_stop) return;
         if (FLAGS_expected_qps > 0) {
-            while (g_token.load(butil::memory_order_relaxed) <= 0) {
-                bthread_usleep(10);
+            while (g_token.load(butil::memory_order_relaxed) <= 0 && !g_stop) {
+                bthread_usleep(1);
             }
+            if (g_stop) return;
             g_token.fetch_sub(1, butil::memory_order_relaxed);
         }
-        RespClosure* closure = new RespClosure;
+
+        RequestContext* ctx = new RequestContext();
+        ctx->test = this;
+        ctx->channel_index = _channel_counter.fetch_add(1, butil::memory_order_relaxed) % _num_channels;
+        ctx->cntl.request_attachment().append(_attachment);
+
         test::PerfTestRequest request;
-        closure->resp = new test::PerfTestResponse();
-        closure->cntl = new brpc::Controller();
         request.set_echo_attachment(_echo_attachment);
-        closure->cntl->request_attachment().append(_attachment);
-        closure->test = this;
-        google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
-        test::PerfTestService_Stub stub(_channel);
-        stub.Test(closure->cntl, &request, closure->resp, done);
+
+        _inflight.fetch_add(1, butil::memory_order_relaxed);
+
+        test::PerfTestService_Stub stub(_channels[ctx->channel_index]);
+        google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, ctx);
+        stub.Test(&ctx->cntl, &request, &ctx->resp, done);
     }
 
-    static void HandleResponse(RespClosure* closure) {
-        std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
-        std::unique_ptr<test::PerfTestResponse> response_guard(closure->resp);
-        if (closure->cntl->Failed()) {
-            LOG(ERROR) << "RPC call failed: " << closure->cntl->ErrorText();
-            closure->test->_stop = true;
+    static void HandleResponse(RequestContext* ctx) {
+        PerformanceTest* test = ctx->test;
+
+        if (ctx->cntl.Failed()) {
+            g_error_cnt.fetch_add(1, butil::memory_order_relaxed);
+            if (ctx->cntl.ErrorCode() != brpc::ELOGOFF &&
+                ctx->cntl.ErrorCode() != brpc::ERPCTIMEDOUT) {
+                LOG(ERROR) << "RPC call failed: " << ctx->cntl.ErrorText();
+                test->_stop = true;
+            }
+            delete ctx;
+            test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
 
-        g_latency_recorder << closure->cntl->latency_us();
-        if (closure->resp->cpu_usage().size() > 0) {
-            g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
+        g_latency_recorder << ctx->cntl.latency_us();
+        if (ctx->resp.cpu_usage().size() > 0) {
+            g_server_cpu_recorder << atof(ctx->resp.cpu_usage().c_str()) * 100;
         }
-        g_total_bytes.fetch_add(closure->cntl->request_attachment().size(), butil::memory_order_relaxed);
+        g_total_bytes.fetch_add(ctx->cntl.request_attachment().size(), butil::memory_order_relaxed);
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
 
-        cntl_guard.reset(NULL);
-        response_guard.reset(NULL);
-
-        if (closure->test->_iterations == 0 && FLAGS_test_iterations > 0) {
-            closure->test->_stop = true;
+        if (test->_iterations == 0 && FLAGS_test_iterations > 0) {
+            test->_stop = true;
+            delete ctx;
+            test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
-        --closure->test->_iterations;
+        --test->_iterations;
+
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         uint64_t now = butil::gettimeofday_us();
         if (now > last && now - last > 100000) {
             if (g_last_time.exchange(now, butil::memory_order_relaxed) == last) {
-                g_client_cpu_recorder << 
+                g_client_cpu_recorder <<
                     atof(bvar::Variable::describe_exposed("process_cpu_usage").c_str()) * 100;
             }
         }
-        if (now - closure->test->_start_time > FLAGS_test_seconds * 1000000u) {
-            closure->test->_stop = true;
+        if (now - test->_start_time > (uint64_t)FLAGS_test_seconds * 1000000u) {
+            test->_stop = true;
+            delete ctx;
+            test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
-        closure->test->SendRequest();
+
+        delete ctx;
+        test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
+        test->SendRequest();
     }
 
     static void* RunTest(void* arg) {
         PerformanceTest* test = (PerformanceTest*)arg;
         test->_start_time = butil::gettimeofday_us();
         test->_iterations = FLAGS_test_iterations;
-        
+
         for (int i = 0; i < FLAGS_queue_depth; ++i) {
             test->SendRequest();
+        }
+
+        while (!test->_stop) {
+            bthread_usleep(1000);
+        }
+
+        while (test->_inflight.load(butil::memory_order_relaxed) > 0) {
+            bthread_usleep(1000);
         }
 
         return NULL;
@@ -204,12 +253,15 @@ public:
 
 private:
     void* _addr;
-    brpc::Channel* _channel;
+    std::vector<brpc::Channel*> _channels;
     uint64_t _start_time;
     uint32_t _iterations;
     volatile bool _stop;
     butil::IOBuf _attachment;
     bool _echo_attachment;
+    int _num_channels;
+    butil::atomic<int> _channel_counter;
+    butil::atomic<int> _inflight;
 };
 
 static void* DeleteTest(void* arg) {
@@ -218,28 +270,74 @@ static void* DeleteTest(void* arg) {
     return NULL;
 }
 
+void ApplyCommonFlags() {
+    if (FLAGS_perf_max_conn_pool_size > 0) {
+        GFLAGS_NAMESPACE::SetCommandLineOption("max_connection_pool_size",
+            std::to_string(FLAGS_perf_max_conn_pool_size).c_str());
+    }
+    if (FLAGS_perf_socket_recv_buf > 0) {
+        GFLAGS_NAMESPACE::SetCommandLineOption("socket_recv_buffer_size",
+            std::to_string(FLAGS_perf_socket_recv_buf).c_str());
+    }
+    if (FLAGS_perf_socket_send_buf > 0) {
+        GFLAGS_NAMESPACE::SetCommandLineOption("socket_send_buffer_size",
+            std::to_string(FLAGS_perf_socket_send_buf).c_str());
+    }
+    if (FLAGS_perf_bthread_concurrency > 0) {
+        GFLAGS_NAMESPACE::SetCommandLineOption("bthread_concurrency",
+            std::to_string(FLAGS_perf_bthread_concurrency).c_str());
+    }
+
+    LOG(INFO) << "Common configuration: max_conn_pool=" << FLAGS_perf_max_conn_pool_size
+              << ", socket_recv_buf=" << FLAGS_perf_socket_recv_buf
+              << ", socket_send_buf=" << FLAGS_perf_socket_send_buf
+              << ", bthread_concurrency=" << FLAGS_perf_bthread_concurrency;
+}
+
+void ApplyRdmaFlags() {
+    if (!FLAGS_use_rdma) return;
+
+    GFLAGS_NAMESPACE::SetCommandLineOption("rdma_sq_size", std::to_string(FLAGS_perf_rdma_sq_size).c_str());
+    GFLAGS_NAMESPACE::SetCommandLineOption("rdma_rq_size", std::to_string(FLAGS_perf_rdma_rq_size).c_str());
+    GFLAGS_NAMESPACE::SetCommandLineOption("rdma_use_polling", FLAGS_perf_rdma_use_polling ? "true" : "false");
+    GFLAGS_NAMESPACE::SetCommandLineOption("rdma_poller_num", std::to_string(FLAGS_perf_rdma_poller_num).c_str());
+    GFLAGS_NAMESPACE::SetCommandLineOption("rdma_cqe_poll_once", std::to_string(FLAGS_perf_rdma_cqe_poll_once).c_str());
+    GFLAGS_NAMESPACE::SetCommandLineOption("rdma_prepared_qp_size", std::to_string(FLAGS_perf_rdma_sq_size).c_str());
+
+    LOG(INFO) << "RDMA configuration: sq_size=" << FLAGS_perf_rdma_sq_size
+              << ", rq_size=" << FLAGS_perf_rdma_rq_size
+              << ", polling=" << FLAGS_perf_rdma_use_polling
+              << ", poller_num=" << FLAGS_perf_rdma_poller_num
+              << ", cqe_poll_once=" << FLAGS_perf_rdma_cqe_poll_once;
+}
+
 void Test(int thread_num, int attachment_size) {
+    int num_channels = FLAGS_channel_num > 0 ? FLAGS_channel_num : std::max(1, thread_num);
     std::cout << "[Threads: " << thread_num
         << ", Depth: " << FLAGS_queue_depth
         << ", Attachment: " << attachment_size << "B"
         << ", RDMA: " << (FLAGS_use_rdma ? "yes" : "no")
-        << ", Echo: " << (FLAGS_echo_attachment ? "yes]" : "no]")
-        << std::endl;
+        << ", Echo: " << (FLAGS_echo_attachment ? "yes" : "no")
+        << ", ConnType: " << FLAGS_connection_type
+        << ", Channels: " << num_channels
+        << ", ConnPool: " << FLAGS_perf_max_conn_pool_size
+        << "]" << std::endl;
     g_total_bytes.store(0, butil::memory_order_relaxed);
     g_total_cnt.store(0, butil::memory_order_relaxed);
+    g_error_cnt.store(0, butil::memory_order_relaxed);
     std::vector<PerformanceTest*> tests;
     for (int k = 0; k < thread_num; ++k) {
-        PerformanceTest* t = new PerformanceTest(attachment_size, FLAGS_echo_attachment);
+        PerformanceTest* t = new PerformanceTest(attachment_size, FLAGS_echo_attachment, num_channels);
         if (t->Init() < 0) {
             exit(1);
         }
         tests.push_back(t);
     }
     uint64_t start_time = butil::gettimeofday_us();
-    bthread_t tid[thread_num];
+    bthread_t* tid = new bthread_t[thread_num];
     if (FLAGS_expected_qps > 0) {
-        bthread_t tid;
-        bthread_start_background(&tid, &BTHREAD_ATTR_NORMAL, GenerateToken, NULL);
+        bthread_t token_tid;
+        bthread_start_background(&token_tid, &BTHREAD_ATTR_NORMAL, GenerateToken, NULL);
     }
     for (int k = 0; k < thread_num; ++k) {
         bthread_start_background(&tid[k], &BTHREAD_ATTR_NORMAL,
@@ -251,16 +349,21 @@ void Test(int thread_num, int attachment_size) {
         }
     }
     uint64_t end_time = butil::gettimeofday_us();
-    double throughput = g_total_bytes / 1.048576 / (end_time - start_time);
+    double elapsed_s = (end_time - start_time) / 1000000.0;
+    uint64_t total_cnt = g_total_cnt.load(butil::memory_order_relaxed);
+    uint64_t error_cnt = g_error_cnt.load(butil::memory_order_relaxed);
+    double throughput = g_total_bytes.load(butil::memory_order_relaxed) / 1.048576 / (end_time - start_time);
+    double qps = total_cnt / elapsed_s;
     if (FLAGS_test_iterations == 0) {
-        std::cout << "Avg-Latency: " << g_latency_recorder.latency(10)
-            << ", 90th-Latency: " << g_latency_recorder.latency_percentile(0.9)
-            << ", 99th-Latency: " << g_latency_recorder.latency_percentile(0.99)
-            << ", 99.9th-Latency: " << g_latency_recorder.latency_percentile(0.999)
+        std::cout << "QPS: " << (uint64_t)qps
+            << ", Avg-Latency: " << g_latency_recorder.latency(10)
+            << ", 90th: " << g_latency_recorder.latency_percentile(0.9)
+            << ", 99th: " << g_latency_recorder.latency_percentile(0.99)
+            << ", 99.9th: " << g_latency_recorder.latency_percentile(0.999)
             << ", Throughput: " << throughput << "MB/s"
-            << ", QPS: " << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 / (end_time - start_time)) << "k"
-            << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "\%"
-            << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "\%"
+            << ", Errors: " << error_cnt
+            << ", Server-CPU: " << g_server_cpu_recorder.latency(10) << "%"
+            << ", Client-CPU: " << g_client_cpu_recorder.latency(10) << "%"
             << std::endl;
     } else {
         std::cout << " Throughput: " << throughput << "MB/s" << std::endl;
@@ -269,12 +372,15 @@ void Test(int thread_num, int attachment_size) {
     for (int k = 0; k < thread_num; ++k) {
         bthread_start_background(&tid[k], &BTHREAD_ATTR_NORMAL, DeleteTest, tests[k]);
     }
+    delete[] tid;
 }
 
 int main(int argc, char* argv[]) {
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
 
-    // Initialize RDMA environment in advance.
+    ApplyCommonFlags();
+    ApplyRdmaFlags();
+
     if (FLAGS_use_rdma) {
         brpc::rdma::GlobalRdmaInitializeOrDie();
     }
