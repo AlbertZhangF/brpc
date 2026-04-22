@@ -1,89 +1,75 @@
-# 研究发现：brpc RDMA性能瓶颈分析
+# 研究发现：TCP连接问题诊断
 
-## 代码架构分析
+## 错误日志分析
 
-### 客户端请求流程
-1. PerformanceTest::SendRequest() -> 创建Controller/Response/Closure
-2. stub.Test() -> Channel::CallMethod() -> 序列化请求
-3. Socket::Write() -> 将请求加入写队列
-4. Socket::KeepWrite() -> 调用DoWrite()
-5. DoWrite() -> RdmaEndpoint::CutFromIOBufList() -> ibv_post_send()
-6. 响应到达 -> PollCq -> HandleCompletion -> ProcessNewMessage
-7. HandleResponse回调 -> 再次SendRequest()
+### 客户端错误分类
+| 错误码 | 含义 | 出现场景 |
+|--------|------|----------|
+| E110 | Connection timed out | TCP连接超时，服务端未响应SYN+ACK |
+| E101 | Network is unreachable | 本地端口耗尽或路由不可达 |
+| E112 | Not connected yet | Socket未建立连接就尝试发送请求 |
 
-### RDMA窗口机制
-- _window_size = min(local_SQ, remote_RQ) - RESERVED_WR_NUM(3)
-- 每次ibv_post_send后_window_size减1
-- 收到ACK后_window_size增加
-- _window_size=0时CutFromIOBufList返回EAGAIN
-- Socket::KeepWait等待epollout事件
+### 服务端错误
+- `Connection reset by peer` - 客户端在连接建立前放弃，发送RST
 
-### 关键GFlags及默认值
-| Flag | 默认值 | 优化值 | 影响 |
-|------|--------|--------|------|
-| rdma_sq_size | 128 | 1024 | SQ容量，限制发送窗口 |
-| rdma_rq_size | 128 | 1024 | RQ容量，限制接收窗口 |
-| rdma_use_polling | false | true | 事件驱动vs轮询模式 |
-| rdma_poller_num | 1 | 4 | 轮询线程数 |
-| rdma_cqe_poll_once | 32 | 64 | 每次CQ轮询最大CQE数 |
-| rdma_prepared_qp_size | 128 | 1024 | 预分配QP大小 |
-| rdma_prepared_qp_cnt | 1024 | 1024 | 预分配QP数量 |
+## 根本原因分析
 
-### 连接类型分析
-- single: 所有请求共享一个Socket，一个RDMA Endpoint
-- pooled: 从连接池获取Socket，每个Socket有独立RDMA Endpoint
-- short: 每次请求创建新连接（不适合高性能）
+### R1: 连接风暴 (CRITICAL)
+- 64线程 × 64 Channel = 4096个Channel
+- 每个Channel在pooled模式下首次RPC时触发连接建立
+- RunTest循环立即开始发送，所有线程同时发起连接
+- 服务端listen backlog（默认128）无法容纳如此多SYN请求
+- 超出backlog的SYN被丢弃→客户端超时
 
-## 瓶颈量化分析
+### R2: 缺少连接预热 (HIGH)
+- Init()仅对Channel[0]做1次同步RPC
+- 其余63个Channel的连接从未建立
+- RunTest开始后，所有线程同时尝试建立连接
+- 连接建立需要时间（TCP三次握手+brpc内部初始化）
 
-### B1: 串行请求模式 (CRITICAL)
-- 原始代码HandleResponse中仅发送1个新请求
-- 稳态并发数=queue_depth*thread_num
-- 默认queue_depth=1，即每线程仅1个在途请求
-- 优化: queue_depth=64，每线程64个在途请求
+### R3: Channel数量过多 (HIGH)
+- 当前设计：每线程创建num_channels个Channel
+- 64线程 × 64 Channel = 4096个Channel对象
+- 每个Channel独立连接池，独立Socket管理
+- 过多Channel导致资源浪费和连接管理复杂
 
-### B2: 单连接类型 (CRITICAL)
-- connection_type="single"导致所有bthread共享同一Socket
-- RDMA窗口被所有线程共享，造成严重竞争
-- 优化: 使用"pooled"连接类型，多Channel轮询
+### R4: bthread_concurrency配置问题 (MEDIUM)
+- 运行命令中`--bthread_concurrency=160`但代码中`perf_bthread_concurrency=0`
+- ApplyCommonFlags中0表示不设置，实际bthread_concurrency=8+2=10
+- 10个工作pthread无法支撑64个发送bthread+回调处理
 
-### B3: RDMA窗口大小限制 (CRITICAL)
-- 默认窗口=min(128,128)-3=125
-- 单连接下所有线程共享125个RDMA发送槽
-- 优化: SQ/RQ=1024，窗口=1021
+## brpc连接机制分析
 
-### B4: RDMA事件驱动模式 (HIGH)
-- 默认rdma_use_polling=false
-- CQ事件通过event dispatcher处理，增加延迟
-- 优化: 启用轮询模式
+### pooled连接建立流程
+1. Channel::CallMethod() → 获取Socket
+2. SocketPool::GetSocket() → 从池中取空闲Socket
+3. 池空 → 创建新Socket → TCP connect()
+4. 连接成功 → Socket::IsAvailable()=true
+5. 连接未完成 → IsAvailable()=false → E112错误
 
-### B5: 热路径内存分配 (MEDIUM)
-- 每次SendRequest分配3个堆对象
-- 优化: RequestContext统一结构体
+### 关键发现
+- Channel.Init()**不会**建立TCP连接，仅创建Socket元数据
+- TCP连接在**首次RPC时**按需建立
+- pooled模式下，连接池初始为空
+- max_connection_pool_size控制池中最大空闲连接数，不是最大连接数
 
-### B6: 令牌桶限速 (MEDIUM)
-- expected_qps>0时令牌桶限制QPS
-- 优化: 默认expected_qps=0(不限速)
+## 解决方案
 
-### B7: CQ轮询批量大小 (LOW)
-- rdma_cqe_poll_once=32限制每次轮询CQE数
-- 优化: 增大到64
+### S1: 连接预热
+- Init()中对所有Channel进行同步ping
+- 确保所有Channel的连接在压测前建立完成
+- 分批预热，避免瞬时大量连接
 
-### B8: RDMA轮询器数量 (LOW)
-- rdma_poller_num=1，轮询模式下仅1个轮询线程
-- 优化: 增大到4
+### S2: Channel共享优化
+- 减少Channel数量，多线程共享Channel
+- Channel是线程安全的，可被多bthread共享
+- 使用较少Channel + pooled连接池实现高并发
 
-## 发现的框架Bug
+### S3: bthread_concurrency正确设置
+- 默认值设为CPU核数
+- 确保ApplyCommonFlags正确生效
 
-### BUG: AllocateQpCq中CQ大小不足
-- **位置**: src/brpc/rdma/rdma_endpoint.cpp:AllocateQpCq()
-- **问题**: CQ大小使用`2 * FLAGS_rdma_prepared_qp_size`，而非`sq_size + rq_size`
-- **影响**: 当SQ/RQ大小超过rdma_prepared_qp_size时，CQ溢出
-- **修复**: 改为使用`sq_size + rq_size`作为CQ大小
-- **状态**: 已修复
-
-### 理论性能分析
-- 优化后窗口=1021，假设延迟50us
-- 单连接理论QPS=1021/0.00005=20.4M
-- pooled连接+多Channel，理论QPS可线性扩展
-- 实际受限于CPU、内存带宽、RDMA网卡能力
+### S4: 渐进式启动
+- 分批启动发送bthread
+- 每批启动后短暂等待连接建立
+- 避免所有线程同时发起连接
