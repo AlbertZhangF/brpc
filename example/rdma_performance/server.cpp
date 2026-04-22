@@ -20,6 +20,7 @@
 #include "butil/atomicops.h"
 #include "butil/logging.h"
 #include "butil/time.h"
+#include "brpc/rdma/rdma_helper.h"
 #include "brpc/server.h"
 #include "bvar/variable.h"
 #include "test.pb.h"

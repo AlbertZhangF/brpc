@@ -27,6 +27,7 @@ execute_process(
 
 set(CMAKE_PREFIX_PATH ${OUTPUT_PATH})
 
+include_directories(/home/zfz/ins/protobuf/include)
 include(FindThreads)
 include(FindProtobuf)
 protobuf_generate_cpp(PROTO_SRC PROTO_HEADER test.proto)
@@ -66,26 +67,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     endif()
 endif()
 
-find_library(IOURING_LIB NAMES uring)
-if(NOT IOURING_LIB)
-    set(IOURING_LIB "")
-    set(WITH_IO_URING 0)
-else()
-    set(WITH_IO_URING 1)
-endif()
-
-set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=1 -DBRPC_WITH_IO_URING=${WITH_IO_URING}")
+set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=1")
 set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O2 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
 
 if(CMAKE_VERSION VERSION_LESS "3.1.3")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
     endif()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
     endif()
 else()
-    set(CMAKE_CXX_STANDARD 11)
+    set(CMAKE_CXX_STANDARD 17)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
@@ -124,6 +117,7 @@ set(DYNAMIC_LIB
     ${OPENSSL_CRYPTO_LIBRARY}
     ${OPENSSL_SSL_LIBRARY}
     ${THRIFT_LIB}
+    ${RDMA_LIB}
     ${IOURING_LIB}
     dl
     )
@@ -151,3 +145,17 @@ add_executable(server server.cpp ${PROTO_SRC} ${PROTO_HEADER})
 
 target_link_libraries(client ${BRPC_LIB} ${DYNAMIC_LIB})
 target_link_libraries(server ${BRPC_LIB} ${DYNAMIC_LIB})
+
+file(GLOB ABSL_LIBS "/home/zfz/ins/protobuf/lib64/libabsl_*.so")
+
+# 2. 定义强制链接标志
+# -Wl,--no-as-needed 会强制链接器加载后续的所有库，不论是否看起来“没被直接使用”
+set(FORCE_LINK_FLAGS "-Wl,--no-as-needed")
+
+# 3. 更新链接逻辑
+if(TARGET client)
+    target_link_libraries(client PRIVATE ${FORCE_LINK_FLAGS} ${ABSL_LIBS})
+endif()
+if(TARGET server)
+    target_link_libraries(server PRIVATE ${FORCE_LINK_FLAGS} ${ABSL_LIBS})
+endif()
