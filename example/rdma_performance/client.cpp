@@ -33,7 +33,7 @@
 #ifdef BRPC_WITH_RDMA
 
 DEFINE_int32(thread_num, 0, "How many threads are used");
-DEFINE_int32(queue_depth, 64, "How many requests can be pending per thread");
+DEFINE_int32(max_inflight, 10000, "Max inflight requests per thread (0=unlimited)");
 DEFINE_int32(expected_qps, 0, "The expected QPS (0 means unlimited)");
 DEFINE_int32(max_thread_num, 16, "The max number of threads are used");
 DEFINE_int32(attachment_size, -1, "Attachment size is used (in Bytes)");
@@ -99,7 +99,7 @@ public:
     PerformanceTest(int attachment_size, bool echo_attachment, int num_channels)
         : _addr(NULL)
         , _start_time(0)
-        , _iterations(0)
+        , _remaining_iterations(0)
         , _stop(false)
         , _inflight(0)
         , _echo_attachment(echo_attachment)
@@ -156,13 +156,39 @@ public:
         return 0;
     }
 
-    void SendRequest() {
-        if (_stop) return;
-        if (FLAGS_expected_qps > 0) {
-            while (g_token.load(butil::memory_order_relaxed) <= 0 && !g_stop) {
-                bthread_usleep(1);
+    bool SendRequest() {
+        if (_stop) return false;
+
+        if (FLAGS_test_iterations > 0) {
+            if (_remaining_iterations.fetch_sub(1, butil::memory_order_relaxed) <= 0) {
+                _remaining_iterations.fetch_add(1, butil::memory_order_relaxed);
+                if (_inflight.load(butil::memory_order_relaxed) == 0) {
+                    _stop = true;
+                }
+                return false;
             }
-            if (g_stop) return;
+        }
+
+        if (FLAGS_max_inflight > 0) {
+            int old_val = _inflight.load(butil::memory_order_relaxed);
+            while (old_val < FLAGS_max_inflight) {
+                if (_inflight.compare_exchange_strong(old_val, old_val + 1,
+                        butil::memory_order_relaxed)) {
+                    break;
+                }
+            }
+            if (old_val >= FLAGS_max_inflight) {
+                return false;
+            }
+        } else {
+            _inflight.fetch_add(1, butil::memory_order_relaxed);
+        }
+
+        if (FLAGS_expected_qps > 0) {
+            if (g_token.load(butil::memory_order_relaxed) <= 0) {
+                _inflight.fetch_sub(1, butil::memory_order_relaxed);
+                return false;
+            }
             g_token.fetch_sub(1, butil::memory_order_relaxed);
         }
 
@@ -174,11 +200,10 @@ public:
         test::PerfTestRequest request;
         request.set_echo_attachment(_echo_attachment);
 
-        _inflight.fetch_add(1, butil::memory_order_relaxed);
-
         test::PerfTestService_Stub stub(_channels[ctx->channel_index]);
         google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, ctx);
         stub.Test(&ctx->cntl, &request, &ctx->resp, done);
+        return true;
     }
 
     static void HandleResponse(RequestContext* ctx) {
@@ -203,14 +228,6 @@ public:
         g_total_bytes.fetch_add(ctx->cntl.request_attachment().size(), butil::memory_order_relaxed);
         g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
 
-        if (test->_iterations == 0 && FLAGS_test_iterations > 0) {
-            test->_stop = true;
-            delete ctx;
-            test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
-            return;
-        }
-        --test->_iterations;
-
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         uint64_t now = butil::gettimeofday_us();
         if (now > last && now - last > 100000) {
@@ -228,24 +245,32 @@ public:
 
         delete ctx;
         test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
-        test->SendRequest();
+
+        if (FLAGS_test_iterations > 0 &&
+            test->_remaining_iterations.load(butil::memory_order_relaxed) == 0 &&
+            test->_inflight.load(butil::memory_order_relaxed) == 0) {
+            test->_stop = true;
+        }
     }
 
     static void* RunTest(void* arg) {
         PerformanceTest* test = (PerformanceTest*)arg;
         test->_start_time = butil::gettimeofday_us();
-        test->_iterations = FLAGS_test_iterations;
-
-        for (int i = 0; i < FLAGS_queue_depth; ++i) {
-            test->SendRequest();
-        }
+        test->_remaining_iterations.store(FLAGS_test_iterations, butil::memory_order_relaxed);
 
         while (!test->_stop) {
-            bthread_usleep(1000);
+            if (!test->SendRequest()) {
+                bthread_usleep(1);
+            }
         }
 
+        uint64_t drain_start = butil::gettimeofday_us();
         while (test->_inflight.load(butil::memory_order_relaxed) > 0) {
-            bthread_usleep(1000);
+            bthread_usleep(100);
+            if (butil::gettimeofday_us() - drain_start > 5000000) {
+                LOG(WARNING) << "Drain timeout, " << test->_inflight.load() << " requests still in flight";
+                break;
+            }
         }
 
         return NULL;
@@ -255,7 +280,7 @@ private:
     void* _addr;
     std::vector<brpc::Channel*> _channels;
     uint64_t _start_time;
-    uint32_t _iterations;
+    butil::atomic<uint32_t> _remaining_iterations;
     volatile bool _stop;
     butil::IOBuf _attachment;
     bool _echo_attachment;
@@ -314,7 +339,7 @@ void ApplyRdmaFlags() {
 void Test(int thread_num, int attachment_size) {
     int num_channels = FLAGS_channel_num > 0 ? FLAGS_channel_num : std::max(1, thread_num);
     std::cout << "[Threads: " << thread_num
-        << ", Depth: " << FLAGS_queue_depth
+        << ", MaxInflight: " << (FLAGS_max_inflight > 0 ? std::to_string(FLAGS_max_inflight) : "unlimited")
         << ", Attachment: " << attachment_size << "B"
         << ", RDMA: " << (FLAGS_use_rdma ? "yes" : "no")
         << ", Echo: " << (FLAGS_echo_attachment ? "yes" : "no")
