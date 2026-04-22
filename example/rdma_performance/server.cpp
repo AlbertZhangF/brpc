@@ -29,7 +29,8 @@
 
 DEFINE_int32(port, 8002, "TCP Port of this server");
 DEFINE_bool(use_rdma, false, "Use RDMA or not");
-DEFINE_int32(num_threads, 0, "Number of worker threads (0=#cpu-cores)");
+DEFINE_int32(num_threads, 0, "Number of worker pthreads (0=CPU cores)");
+DEFINE_int32(perf_bthread_concurrency, 0, "bthread worker concurrency (0=CPU cores)");
 DEFINE_int32(perf_rdma_sq_size, 1024, "RDMA SQ size for this test");
 DEFINE_int32(perf_rdma_rq_size, 1024, "RDMA RQ size for this test");
 DEFINE_bool(perf_rdma_use_polling, true, "Use RDMA polling mode for this test");
@@ -81,8 +82,17 @@ void ApplyCommonFlags() {
             std::to_string(FLAGS_perf_socket_send_buf).c_str());
     }
 
+    int bthread_conc = FLAGS_perf_bthread_concurrency;
+    if (bthread_conc <= 0) {
+        bthread_conc = sysconf(_SC_NPROCESSORS_ONLN);
+        if (bthread_conc <= 0) bthread_conc = 8;
+    }
+    GFLAGS_NAMESPACE::SetCommandLineOption("bthread_concurrency",
+        std::to_string(bthread_conc).c_str());
+
     LOG(INFO) << "Common configuration: socket_recv_buf=" << FLAGS_perf_socket_recv_buf
-              << ", socket_send_buf=" << FLAGS_perf_socket_send_buf;
+              << ", socket_send_buf=" << FLAGS_perf_socket_send_buf
+              << ", bthread_concurrency=" << bthread_conc;
 }
 
 void ApplyRdmaFlags() {
@@ -126,6 +136,9 @@ int main(int argc, char* argv[]) {
     options.use_rdma = FLAGS_use_rdma;
     if (FLAGS_num_threads > 0) {
         options.num_threads = FLAGS_num_threads;
+    } else {
+        options.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+        if (options.num_threads <= 0) options.num_threads = 8;
     }
     if (server.Start(FLAGS_port, &options) != 0) {
         LOG(ERROR) << "Fail to start EchoServer";
@@ -134,7 +147,7 @@ int main(int argc, char* argv[]) {
 
     LOG(INFO) << "Server started on port " << FLAGS_port
               << " with RDMA=" << (FLAGS_use_rdma ? "yes" : "no")
-              << " num_threads=" << (FLAGS_num_threads > 0 ? FLAGS_num_threads : 0);
+              << " num_threads=" << options.num_threads;
 
     server.RunUntilAskedToQuit();
     return 0;

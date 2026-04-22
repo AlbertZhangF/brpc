@@ -1,76 +1,48 @@
-# 任务计划：TCP连接问题诊断与修复
+# 任务计划：Segfault修复与pthread配置
 
 ## 目标
-解决debug_info.md中记录的TCP连接未成功建立问题，确保高并发压测场景下连接稳定可靠。
+1. 修复client预热后Segfault崩溃
+2. 修复channel_num未受上限约束
+3. 补充client/server运行时pthread数量配置
 
 ## 问题分析
 
-### 根本原因
-| 编号 | 原因 | 严重度 |
-|------|------|--------|
-| R1 | 连接风暴：64线程×64Channel=4096并发连接请求 | CRITICAL |
-| R2 | 缺少连接预热：仅Channel[0]做1次同步验证 | HIGH |
-| R3 | Channel数量过多：每线程独立创建Channel | HIGH |
-| R4 | bthread_concurrency默认值仅8+2=10 | MEDIUM |
+### P1: Segfault (CRITICAL)
+- 768个bthread同时启动，全速发送异步RPC
+- max_inflight=0表示无限制，768线程×无限制=内存耗尽
+- 每个RequestContext约1KB，7.68M并发=7.68GB→OOM→Segfault
+- 修复：添加g_max_total_inflight全局上限，默认min(thread_num*10000, 500000)
+
+### P2: channel_num未受上限 (HIGH)  
+- 用户传入--channel_num=768，绕过了min(thread_num,16)上限
+- 768个Channel创建768个连接池，资源浪费
+- 修复：始终限制channel_num <= max_channel_num(默认64)
+
+### P3: 缺少pthread数量 (MEDIUM)
+- server端num_threads默认0但未设置合理默认值
+- server端缺少bthread_concurrency设置
+- 修复：默认值改为CPU核数，添加perf_bthread_concurrency
 
 ## 执行阶段
 
-### Phase 7: 问题诊断与方案设计 ✅ completed
-- ✅ 分析debug_info.md错误日志
-- ✅ 识别4个根本原因(R1-R4)
-- ✅ 设计解决方案
+### Phase 12: 修复Segfault和channel_num ✅ completed
+- ✅ 添加g_max_total_inflight全局inflight上限
+- ✅ 默认值min(thread_num*10000, 500000)，防止OOM
+- ✅ channel_num始终受max_channel_num(64)上限约束
+- ✅ HandleResponse中递减g_total_inflight
+- ✅ token不足时回退g_total_inflight
 
-### Phase 8: 实现连接预热机制 ✅ completed
-- ✅ 全局共享Channel：所有线程共享一组Channel
-- ✅ Channel数量：min(thread_num, 16)，减少连接数
-- ✅ 异步并行预热：WarmupChannels()分批异步ping
-- ✅ 预热超时保护：warmup_timeout_ms(默认30秒)
-- ✅ 预热失败处理：超过半数失败则退出
+### Phase 13: 补充pthread配置 ✅ completed
+- ✅ server端num_threads默认值改为CPU核数
+- ✅ server端添加perf_bthread_concurrency参数
+- ✅ server端ApplyCommonFlags中设置bthread_concurrency
 
-### Phase 9: 添加连接建立等待机制 ✅ completed
-- ✅ 预热确保所有Channel连接建立
-- ✅ bthread_concurrency默认值改为CPU核数
-- ✅ 渐进式启动bthread：每批8个，间隔10ms
-
-### Phase 10: 控制并发连接数 ✅ completed
-- ✅ Channel共享减少总连接数
-- ✅ warmup_batch_size控制并行预热数(默认10)
-- ✅ 分批启动避免连接风暴
-
-### Phase 11: 代码检视 ✅ completed
+### Phase 14: 代码检视 ✅ completed
 **检视发现与修复**:
 
 | # | 问题 | 严重度 | 状态 |
 |---|------|--------|------|
-| 1 | WarmupChannels使用同步RPC，批次内串行 | HIGH | ✅ 修复：改为异步并行+回调 |
-| 2 | 单个RPC错误即停止整个线程 | HIGH | ✅ 修复：连续100次错误才停止 |
-| 3 | bthread_concurrency默认0不设置 | MEDIUM | ✅ 修复：默认CPU核数 |
-| 4 | Channel数量=thread_num导致过多 | MEDIUM | ✅ 修复：min(thread_num, 16) |
-
-## 关键设计决策
-
-### D6: 全局共享Channel
-- 所有PerformanceTest共享g_channels全局Channel列表
-- Channel是线程安全的，可被多bthread共享
-- g_channel_counter原子变量轮询选择Channel
-- 减少Channel数量从thread_num×thread_num到min(thread_num, 16)
-
-### D7: 异步并行预热
-- WarmupChannels()分批异步发送ping
-- 每批warmup_batch_size个Channel同时预热
-- WarmupContext+WarmupDone回调实现异步等待
-- 预热成功后才启动压测
-
-### D8: 容错错误处理
-- 连续MAX_CONSECUTIVE_ERRORS(100)次错误才停止
-- ELOGOFF/ERPCTIMEDOUT/EHOSTDOWN/ECONNECT错误仅计数不打印
-- 成功请求重置consecutive_errors计数器
-- 避免偶发错误导致压测中断
-
-### D9: 渐进式启动
-- 每批启动8个bthread
-- 批次间间隔10ms
-- 避免所有线程同时发起连接
-
-## 修改文件清单
-1. example/rdma_performance/client.cpp - 全局Channel、预热、容错、渐进启动
+| 1 | max_inflight=0时768线程无限制→OOM→Segfault | CRITICAL | ✅ 修复：g_max_total_inflight上限500000 |
+| 2 | channel_num=768绕过上限 | HIGH | ✅ 修复：始终min(channel_num, max_channel_num) |
+| 3 | server端num_threads默认0无合理值 | MEDIUM | ✅ 修复：默认CPU核数 |
+| 4 | server端缺少bthread_concurrency设置 | MEDIUM | ✅ 修复：添加perf_bthread_concurrency |

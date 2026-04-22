@@ -33,7 +33,8 @@
 #ifdef BRPC_WITH_RDMA
 
 DEFINE_int32(thread_num, 0, "How many threads are used");
-DEFINE_int32(max_inflight, 10000, "Max inflight requests per thread (0=unlimited)");
+DEFINE_int32(max_inflight, 10000, "Max inflight requests per thread (0=auto, =10000)");
+DEFINE_int32(max_total_inflight, 0, "Max total inflight requests across all threads (0=auto, =min(thread_num*max_inflight, 500000))");
 DEFINE_int32(expected_qps, 0, "The expected QPS (0 means unlimited)");
 DEFINE_int32(max_thread_num, 16, "The max number of threads are used");
 DEFINE_int32(attachment_size, -1, "Attachment size is used (in Bytes)");
@@ -51,7 +52,8 @@ DEFINE_int32(perf_rdma_rq_size, 1024, "RDMA RQ size for this test");
 DEFINE_bool(perf_rdma_use_polling, true, "Use RDMA polling mode for this test");
 DEFINE_int32(perf_rdma_poller_num, 4, "Number of RDMA polling threads for this test");
 DEFINE_int32(perf_rdma_cqe_poll_once, 64, "Max CQEs polled per CQ poll for this test");
-DEFINE_int32(channel_num, 0, "Number of shared channels (0=auto, =min(thread_num, 16))");
+DEFINE_int32(channel_num, 0, "Number of shared channels (0=auto)");
+DEFINE_int32(max_channel_num, 64, "Upper limit of shared channels");
 DEFINE_int32(perf_max_conn_pool_size, 1000, "Max pooled connections per endpoint");
 DEFINE_int32(perf_socket_recv_buf, -1, "Socket recv buffer size (-1=system default)");
 DEFINE_int32(perf_socket_send_buf, -1, "Socket send buffer size (-1=system default)");
@@ -71,6 +73,8 @@ butil::atomic<int> g_rr_index(0);
 volatile bool g_stop = false;
 std::vector<brpc::Channel*> g_channels;
 butil::atomic<int> g_channel_counter(0);
+butil::atomic<int> g_total_inflight(0);
+int g_max_total_inflight = 0;
 
 butil::atomic<int64_t> g_token(10000);
 
@@ -151,9 +155,28 @@ public:
             _inflight.fetch_add(1, butil::memory_order_relaxed);
         }
 
+        if (g_max_total_inflight > 0) {
+            int old_total = g_total_inflight.load(butil::memory_order_relaxed);
+            while (old_total < g_max_total_inflight) {
+                if (g_total_inflight.compare_exchange_strong(old_total, old_total + 1,
+                        butil::memory_order_relaxed)) {
+                    break;
+                }
+            }
+            if (old_total >= g_max_total_inflight) {
+                _inflight.fetch_sub(1, butil::memory_order_relaxed);
+                return false;
+            }
+        } else {
+            g_total_inflight.fetch_add(1, butil::memory_order_relaxed);
+        }
+
         if (FLAGS_expected_qps > 0) {
             if (g_token.load(butil::memory_order_relaxed) <= 0) {
                 _inflight.fetch_sub(1, butil::memory_order_relaxed);
+                if (g_max_total_inflight > 0) {
+                    g_total_inflight.fetch_sub(1, butil::memory_order_relaxed);
+                }
                 return false;
             }
             g_token.fetch_sub(1, butil::memory_order_relaxed);
@@ -191,6 +214,7 @@ public:
             }
             delete ctx;
             test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
+            g_total_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
 
@@ -215,11 +239,13 @@ public:
             test->_stop = true;
             delete ctx;
             test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
+            g_total_inflight.fetch_sub(1, butil::memory_order_relaxed);
             return;
         }
 
         delete ctx;
         test->_inflight.fetch_sub(1, butil::memory_order_relaxed);
+        g_total_inflight.fetch_sub(1, butil::memory_order_relaxed);
 
         if (FLAGS_test_iterations > 0 &&
             test->_remaining_iterations.load(butil::memory_order_relaxed) == 0 &&
@@ -408,7 +434,8 @@ void ApplyRdmaFlags() {
 }
 
 void Test(int thread_num, int attachment_size) {
-    int num_channels = FLAGS_channel_num > 0 ? FLAGS_channel_num : std::min(thread_num, 16);
+    int num_channels = FLAGS_channel_num > 0 ? FLAGS_channel_num : std::min(thread_num, FLAGS_max_channel_num);
+    num_channels = std::min(num_channels, FLAGS_max_channel_num);
     
     std::cout << "[Threads: " << thread_num
         << ", MaxInflight: " << (FLAGS_max_inflight > 0 ? std::to_string(FLAGS_max_inflight) : "unlimited")
@@ -424,6 +451,14 @@ void Test(int thread_num, int attachment_size) {
     g_total_cnt.store(0, butil::memory_order_relaxed);
     g_error_cnt.store(0, butil::memory_order_relaxed);
     g_channel_counter.store(0, butil::memory_order_relaxed);
+    g_total_inflight.store(0, butil::memory_order_relaxed);
+
+    int max_inflight_per_thread = FLAGS_max_inflight > 0 ? FLAGS_max_inflight : 10000;
+    if (FLAGS_max_total_inflight > 0) {
+        g_max_total_inflight = FLAGS_max_total_inflight;
+    } else {
+        g_max_total_inflight = std::min(thread_num * max_inflight_per_thread, 500000);
+    }
     
     if (InitGlobalChannels(num_channels) != 0) {
         LOG(ERROR) << "Failed to initialize global channels";
