@@ -34,6 +34,18 @@
 namespace brpc {
 
 InputMessenger* g_messenger = NULL;
+static bvar::Adder<int64_t> g_process_new_message_count(
+        "rpc_process_new_message_count");
+static bvar::Adder<int64_t> g_process_new_message_bytes(
+        "rpc_process_new_message_bytes");
+static bvar::Adder<int64_t> g_process_new_message_parsed_messages(
+        "rpc_process_new_message_parsed_messages");
+static bvar::Adder<int64_t> g_process_new_message_batched_calls(
+        "rpc_process_new_message_batched_calls");
+static bvar::Adder<int64_t> g_process_new_message_direct_calls(
+        "rpc_process_new_message_direct_process_count");
+static bvar::Adder<int64_t> g_process_new_message_queued_bthreads(
+        "rpc_process_new_message_queued_bthread_count");
 static pthread_once_t g_messenger_init = PTHREAD_ONCE_INIT;
 static void InitClientSideMessenger() {
     g_messenger = new InputMessenger;
@@ -210,6 +222,7 @@ static void QueueMessage(InputMessageBase* to_run_msg,
 
 #if BRPC_WITH_RDMA
     if (rdma::FLAGS_rdma_disable_bthread) {
+        g_process_new_message_direct_calls << 1;
         ProcessInputMessage(to_run_msg);
         return;
     }
@@ -217,8 +230,10 @@ static void QueueMessage(InputMessageBase* to_run_msg,
 
     if (!FLAGS_usercode_in_coroutine && bthread_start_background(
             &th, &tmp, ProcessInputMessage, to_run_msg) == 0) {
+        g_process_new_message_queued_bthreads << 1;
         ++*num_bthread_created;
     } else {
+        g_process_new_message_direct_calls << 1;
         ProcessInputMessage(to_run_msg);
     }
 }
@@ -241,12 +256,17 @@ int InputMessenger::ProcessNewMessage(
         const uint64_t received_us, const uint64_t base_realtime,
         InputMessageClosure& last_msg) {
     m->AddInputBytes(bytes);
+    g_process_new_message_count << 1;
+    if (bytes > 0) {
+        g_process_new_message_bytes << bytes;
+    }
 
     // Avoid this socket to be closed due to idle_timeout_s
     m->_last_readtime_us.store(received_us, butil::memory_order_relaxed);
     
     size_t last_size = m->_read_buf.length();
     int num_bthread_created = 0;
+    int parsed_messages = 0;
     while (1) {
         size_t index = 8888;
         ParseResult pr = CutInputMessage(m, &index, read_eof);
@@ -273,6 +293,7 @@ int InputMessenger::ProcessNewMessage(
         }
 
         m->AddInputMessages(1);
+        ++parsed_messages;
         // Calculate average size of messages
         const size_t cur_size = m->_read_buf.length();
         if (cur_size == 0) {
@@ -348,6 +369,12 @@ int InputMessenger::ProcessNewMessage(
     }
     if (num_bthread_created) {
         bthread_flush();
+    }
+    if (parsed_messages > 0) {
+        g_process_new_message_parsed_messages << parsed_messages;
+        if (parsed_messages > 1) {
+            g_process_new_message_batched_calls << 1;
+        }
     }
     return 0;
 }
