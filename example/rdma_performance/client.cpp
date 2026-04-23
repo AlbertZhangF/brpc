@@ -58,7 +58,6 @@ DEFINE_int32(max_inflight, 0, "Global inflight limit in open_loop mode");
 DEFINE_bool(unique_connection_group, false,
             "Create a unique connection_group per Channel to prevent SocketMap reuse");
 DEFINE_bool(report_connection_stats, true, "Print connection-level counters");
-DEFINE_bool(report_wait_stats, true, "Print client-side wait/dispatch bvar deltas");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -105,18 +104,6 @@ struct ConnectionSlot {
     butil::atomic<uint64_t> completed;
     butil::atomic<uint64_t> failed;
     butil::atomic<uint64_t> timeouts;
-};
-
-struct VariableSnapshot {
-    int64_t channel_connection_count;
-    int64_t waitepollout_count;
-    int64_t waitepollout_time_us;
-    int64_t waitepollout_wakeup_count;
-    int64_t process_new_message_count;
-    int64_t process_new_message_parsed_messages;
-    int64_t process_new_message_batched_calls;
-    int64_t process_new_message_direct_process_count;
-    int64_t process_new_message_queued_bthread_count;
 };
 
 struct Worker;
@@ -183,32 +170,6 @@ static void UpdatePeakInflight(int64_t inflight) {
            !g_peak_inflight.compare_exchange_weak(
                    peak, inflight, butil::memory_order_relaxed)) {
     }
-}
-
-static int64_t ParseIntVar(const char* name) {
-    std::string value = bvar::Variable::describe_exposed(name);
-    if (value.empty()) {
-        return 0;
-    }
-    return strtoll(value.c_str(), NULL, 10);
-}
-
-static VariableSnapshot TakeVariableSnapshot() {
-    VariableSnapshot snapshot;
-    snapshot.channel_connection_count = ParseIntVar("rpc_channel_connection_count");
-    snapshot.waitepollout_count = ParseIntVar("rpc_waitepollout_count");
-    snapshot.waitepollout_time_us = ParseIntVar("rpc_waitepollout_time_us");
-    snapshot.waitepollout_wakeup_count = ParseIntVar("rpc_waitepollout_wakeup_count");
-    snapshot.process_new_message_count = ParseIntVar("rpc_process_new_message_count");
-    snapshot.process_new_message_parsed_messages =
-            ParseIntVar("rpc_process_new_message_parsed_messages");
-    snapshot.process_new_message_batched_calls =
-            ParseIntVar("rpc_process_new_message_batched_calls");
-    snapshot.process_new_message_direct_process_count =
-            ParseIntVar("rpc_process_new_message_direct_process_count");
-    snapshot.process_new_message_queued_bthread_count =
-            ParseIntVar("rpc_process_new_message_queued_bthread_count");
-    return snapshot;
 }
 
 static ConnectionSlot* PickConnectionSlot() {
@@ -463,37 +424,6 @@ static void PrintConnectionStats() {
     }
 }
 
-static void PrintVariableDeltas(
-        const VariableSnapshot& before, const VariableSnapshot& after) {
-    if (!FLAGS_report_wait_stats) {
-        return;
-    }
-    std::cout << "bvar deltas:"
-              << " rpc_channel_connection_count="
-              << (after.channel_connection_count - before.channel_connection_count)
-              << ", rpc_waitepollout_count="
-              << (after.waitepollout_count - before.waitepollout_count)
-              << ", rpc_waitepollout_time_us="
-              << (after.waitepollout_time_us - before.waitepollout_time_us)
-              << ", rpc_waitepollout_wakeup_count="
-              << (after.waitepollout_wakeup_count - before.waitepollout_wakeup_count)
-              << ", rpc_process_new_message_count="
-              << (after.process_new_message_count - before.process_new_message_count)
-              << ", rpc_process_new_message_parsed_messages="
-              << (after.process_new_message_parsed_messages -
-                  before.process_new_message_parsed_messages)
-              << ", rpc_process_new_message_batched_calls="
-              << (after.process_new_message_batched_calls -
-                  before.process_new_message_batched_calls)
-              << ", rpc_process_new_message_direct_process_count="
-              << (after.process_new_message_direct_process_count -
-                  before.process_new_message_direct_process_count)
-              << ", rpc_process_new_message_queued_bthread_count="
-              << (after.process_new_message_queued_bthread_count -
-                  before.process_new_message_queued_bthread_count)
-              << std::endl;
-}
-
 static void Test(int thread_num, int attachment_size) {
     const int actual_connection_num =
             FLAGS_connection_num > 0 ? FLAGS_connection_num : thread_num;
@@ -535,12 +465,10 @@ static void Test(int thread_num, int attachment_size) {
     g_open_loop_inflight_limit.store(
             open_loop_inflight_limit, butil::memory_order_relaxed);
 
-    VariableSnapshot before = TakeVariableSnapshot();
     if (InitConnectionSlots(actual_connection_num, FLAGS_echo_attachment) < 0) {
         DestroyConnectionSlots();
         exit(1);
     }
-    VariableSnapshot after_init = TakeVariableSnapshot();
 
     std::vector<Worker*> workers;
     workers.reserve(thread_num);
@@ -581,7 +509,6 @@ static void Test(int thread_num, int attachment_size) {
     }
 
     uint64_t end_time = NowUs();
-    VariableSnapshot after = TakeVariableSnapshot();
     double throughput = 0;
     if (end_time > start_time) {
         throughput = g_total_bytes.load(butil::memory_order_relaxed) /
@@ -611,13 +538,7 @@ static void Test(int thread_num, int attachment_size) {
                   << std::endl;
     }
 
-    std::cout << "Observed rpc_channel_connection_count delta during init/run: "
-              << (after.channel_connection_count - before.channel_connection_count)
-              << " (after init delta="
-              << (after_init.channel_connection_count - before.channel_connection_count)
-              << ")" << std::endl;
     PrintConnectionStats();
-    PrintVariableDeltas(before, after);
 
     g_stop = true;
     for (int k = 0; k < thread_num; ++k) {

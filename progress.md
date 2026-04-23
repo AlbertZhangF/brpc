@@ -26,3 +26,27 @@
   - `rdma_perf_server_request_count`
   - `rdma_perf_server_response_attachment_bytes`
 - Skipped compile/test execution intentionally per user request; final response will include manual run commands only.
+- Re-read the planning files and the current `example/rdma_performance` client/server implementation before writing documentation, to ensure the report matched the repository state.
+- Added `docs/cn/rdma_performance_benchmark_model.md`, a detailed Chinese report covering:
+  - benchmark goals and scope
+  - startup-to-shutdown execution flow
+  - closed-loop vs open-loop semantics
+  - worker/connection/inflight parameter boundaries
+  - observability output and interpretation limits
+  - differences from the original sample model
+  - recommended experiment patterns and example commands
+- Reverted the extra observability added in `2af016d` from:
+  - `src/brpc/socket.h`
+  - `src/brpc/socket.cpp`
+  - `src/brpc/input_messenger.cpp`
+  - `example/rdma_performance/client.cpp`
+  - `example/rdma_performance/server.cpp`
+- Kept the benchmark-model changes intact:
+  - `load_mode=closed_loop|open_loop`
+  - explicit `connection_num`
+  - `unique_connection_group`
+  - warmup RPC in `InitConnectionSlots()`
+  - per-connection stats and inflight accounting
+- Static post-change review confirmed:
+  - removed bvar names no longer appear in the touched code
+  - default connection model is still reuse for same-address `single` channels unless `unique_connection_group=true`

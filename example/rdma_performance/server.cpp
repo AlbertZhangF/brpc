@@ -21,7 +21,6 @@
 #include "butil/logging.h"
 #include "butil/time.h"
 #include "brpc/server.h"
-#include "bvar/bvar.h"
 #include "bvar/variable.h"
 #include "test.pb.h"
 
@@ -31,9 +30,6 @@ DEFINE_int32(port, 8002, "TCP Port of this server");
 DEFINE_bool(use_rdma, true, "Use RDMA or not");
 
 butil::atomic<uint64_t> g_last_time(0);
-static bvar::Adder<int64_t> g_server_request_count("rdma_perf_server_request_count");
-static bvar::Adder<int64_t> g_server_response_attachment_bytes(
-        "rdma_perf_server_response_attachment_bytes");
 
 namespace test {
 class PerfTestServiceImpl : public PerfTestService {
@@ -46,7 +42,6 @@ public:
               PerfTestResponse* response,
               google::protobuf::Closure* done) {
         brpc::ClosureGuard done_guard(done);
-        g_server_request_count << 1;
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         uint64_t now = butil::monotonic_time_us();
         if (now > last && now - last > 100000) {
@@ -62,7 +57,6 @@ public:
             brpc::Controller* cntl =
                 static_cast<brpc::Controller*>(cntl_base);
             cntl->response_attachment().append(cntl->request_attachment());
-            g_server_response_attachment_bytes << cntl->request_attachment().size();
         }
     }
 };

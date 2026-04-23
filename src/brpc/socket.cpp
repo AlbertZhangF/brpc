@@ -1254,7 +1254,6 @@ int Socket::WaitEpollOut(int fd, bool pollin, const timespec* abstime) {
     if (!ValidFileDescriptor(fd)) {
         return 0;
     }
-    const int64_t start_wait_us = butil::cpuwide_time_us();
     // Do not need to check addressable since it will be called by
     // health checker which called `SetFailed' before
     const int expected_val = _epollout_butex->load(butil::memory_order_relaxed);
@@ -1271,10 +1270,6 @@ int Socket::WaitEpollOut(int fd, bool pollin, const timespec* abstime) {
     // Ignore return value since `fd' might have been removed
     // by `RemoveConsumer' in `SetFailed'
     butil::ignore_result(_io_event.UnregisterEvent(fd, pollin));
-    g_vars->nwaitepollout_time_us << (butil::cpuwide_time_us() - start_wait_us);
-    if (rc == 0) {
-        g_vars->nwaitepollout_wakeup << 1;
-    }
     errno = saved_errno;
     // Could be writable or spurious wakeup (by former epollout)
     return rc;

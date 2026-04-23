@@ -144,8 +144,6 @@ struct SocketVarsCollector {
         , nkeepwrite_second("rpc_keepwrite_second", &nkeepwrite)
         , nwaitepollout("rpc_waitepollout_count")
         , nwaitepollout_second("rpc_waitepollout_second", &nwaitepollout)
-        , nwaitepollout_time_us("rpc_waitepollout_time_us")
-        , nwaitepollout_wakeup("rpc_waitepollout_wakeup_count")
     {}
 
     bvar::Adder<int64_t> nsocket;
@@ -157,8 +155,6 @@ struct SocketVarsCollector {
     bvar::PerSecond<bvar::Adder<int64_t> > nkeepwrite_second;
     bvar::Adder<int64_t> nwaitepollout;
     bvar::PerSecond<bvar::Adder<int64_t> > nwaitepollout_second;
-    bvar::Adder<int64_t> nwaitepollout_time_us;
-    bvar::Adder<int64_t> nwaitepollout_wakeup;
 };
 
 struct PipelinedInfo {
