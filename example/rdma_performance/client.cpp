@@ -300,7 +300,7 @@ static void HandleResponse(RespClosure* closure) {
     if (closure->cntl->Failed()) {
         slot->failed.fetch_add(1, butil::memory_order_relaxed);
         g_failed_cnt.fetch_add(1, butil::memory_order_relaxed);
-        if (closure->cntl->ErrorCode() == ERPCTIMEDOUT) {
+        if (closure->cntl->ErrorCode() == brpc::ERPCTIMEDOUT) {
             slot->timeouts.fetch_add(1, butil::memory_order_relaxed);
             g_timeout_cnt.fetch_add(1, butil::memory_order_relaxed);
         }
