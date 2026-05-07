@@ -26,3 +26,46 @@
 - After the revert, the benchmark still keeps the model changes that matter structurally: `open_loop`, `connection_num`, `unique_connection_group`, warmup RPC, per-slot stats, and explicit inflight accounting.
 - The current benchmark still defaults to TCP connection reuse for the same server address because `connection_type=single` and `unique_connection_group=false` still lead to `Channel::InitSingle()` using the same `SocketMapKey(server_addr, zero_signature)` path.
 - Only when `unique_connection_group=true` does the `connection_group` participate in `ChannelSignature`, which makes different `Channel` instances map to different `SocketMapKey` values and therefore tend toward separate underlying TCP connections.
+
+## Channel/server business bthread flow findings
+- `src/brpc/channel.cpp` is the client-side RPC entry and connection-selection layer. `Channel::CallMethod()` runs in the caller context, prepares the `Controller`, serializes the request, configures timers, and then calls `Controller::IssueRPC()`.
+- `Controller::IssueRPC()` selects the target socket using either the single-server socket id or load balancer, applies `connection_type`, packs the request, and writes through `Socket::Write()`.
+- Client-side async completion can create a `RunEndRPC` bthread in `Controller::OnVersionedRPCReturned()`, and that path runs `Controller::EndRPC()` and the user's `done->Run()` callback.
+- `src/brpc/server.cpp` registers services and starts acceptors, but the per-request business bthread is not created directly in `server.cpp`.
+- Server accepted sockets use `InputMessenger::OnNewMessages` as the TCP read-event callback. `Socket::StartInputEvent()` creates `ProcessEvent` bthreads for socket events.
+- `InputMessenger::QueueMessage()` creates `ProcessInputMessage` bthreads for queued messages, while the last message in a batch can run in the current `ProcessEvent` bthread.
+- `policy::ProcessRpcRequest()` deserializes the request, looks up service/method metadata registered by `Server::AddServiceInternal()`, creates the response callback, and by default calls `svc->CallMethod()` in the current request-processing bthread.
+- `Socket::Write()` is shared by client request sends and server response sends. It may create `KeepWrite` bthreads only for background or incomplete writes, not for executing business logic.
+
+## Expanded bthread creation flow findings
+- Client response handling also uses the shared `socket.cpp` / `input_messenger.cpp` receive path before entering `ProcessRpcResponse()` and `Controller::OnVersionedRPCReturned()`.
+- `Controller::RunOnCancel()` creates an urgent `RunOnCancelThread` bthread only when socket failure triggers cancellation; controller reset/destruction can run the cancel callback in place.
+- `Controller::HandleSocketFailed()` can create a background helper bthread to run `OnVersionedRPCReturned()` when retry policy may block the current response/error handling context.
+- `Socket::StartInputEvent()` creates at most one active `ProcessEvent` bthread per socket event-processing window by gating on `_nevent.fetch_add(...) == 0`; additional events are consumed by the active handler through `MoreReadEvents()`.
+- `InputMessenger::QueueMessage()` creates `ProcessInputMessage` with `BTHREAD_NOSIGNAL` and later calls `bthread_flush()` so batched message scheduling does not wake workers one by one.
+- `ProcessInputMessage` is a shared abstraction: on client it leads to response protocol processing and controller completion; on server it leads to request protocol processing and service method execution.
+- `Socket::KeepWrite` is a shared continuation bthread for incomplete/background writes on both client request sends and server response sends; it is not a business execution bthread.
+
+## rdma_performance bthread mapping findings
+- `example/rdma_performance/client.cpp` explicitly creates benchmark bthreads in `Test()`: one optional `GenerateToken` bthread when `expected_qps > 0`, and `thread_num` worker bthreads running either `RunClosedLoopWorker` or `RunOpenLoopWorker`.
+- `RunClosedLoopWorker()` only sends the initial `queue_depth` asynchronous RPCs and then returns; steady-state closed-loop replenishment is performed in `HandleResponse()` when the brpc async callback runs.
+- `RunOpenLoopWorker()` keeps looping and sending while below the global inflight limit; in open-loop mode `HandleResponse()` records stats and releases inflight but does not schedule the next send.
+- `SendRequest()` creates `Controller`, response, and `RespClosure` objects plus a protobuf callback, then calls `stub.Test()`. It does not create a benchmark bthread; framework send/completion bthreads are created later by brpc paths.
+- `PickConnectionSlot()` round-robins over `ConnectionSlot` objects to choose a `Channel`; this chooses the logical channel/connection slot, not the bthread that executes the request.
+- `example/rdma_performance/server.cpp` does not create per-request bthreads. It registers `PerfTestServiceImpl`, starts `brpc::Server`, and lets brpc `socket/input_messenger/protocol` paths invoke `PerfTestServiceImpl::Test()`.
+- `PerfTestServiceImpl::Test()` runs in the brpc request-processing bthread, uses `ClosureGuard` to trigger `done->Run()` on return, and sends the response through `SendRpcResponse` / `Socket::Write`.
+
+## Callback context and TaskGroup enqueue findings
+- Normal successful client responses call `ControllerPrivateAccessor::OnResponse()`, which passes `new_bthread=false` into `Controller::OnVersionedRPCReturned()`. Therefore `rdma_performance` client `HandleResponse()` normally runs inline in the response-processing bthread, not in the original sending worker bthread and not in a newly created `RunEndRPC` bthread.
+- `RunEndRPC` is still possible on special paths, such as asynchronous send failure before request dispatch, cancellation, or helper paths where `OnVersionedRPCReturned()` is invoked with `new_bthread=true`.
+- If `bthread_start_background()` is called from an existing worker bthread with compatible tag, brpc uses the current `TaskGroup` and pushes the new task into the local `_rq`.
+- If bthread creation happens from a non-worker thread or incompatible tag, brpc uses `TaskControl::choose_one_group(tag)` and pushes into that target group's `_remote_rq`.
+- A bthread inserted into the current group's local `_rq` is not guaranteed to execute on that same group, because other groups can steal ready tasks from local run queues.
+- Added PlantUML diagrams to `docs/cn/brpc_channel_server_bthread_flow.md` to show bthread creation and non-creation points in the benchmark client and server paths.
+
+## steal_task experiment planning findings
+- `steal_task` is entered after the current TaskGroup fails to pop a local ready task from `_rq`.
+- The steal order is current group `_remote_rq`, tag priority queue, other groups' `_rq`, and other groups' `_remote_rq`.
+- Server high-QPS request path mainly creates `ProcessInputMessage` from worker context, so most request tasks initially enter local `_rq`, not randomly selected `_remote_rq`.
+- Existing bvars can provide coarse observation through `bthread_group_status`, `bthread_worker_usage*`, `bthread_count*`, and worker counts; perf is still required to attribute CPU to `steal_task` and request-processing frames.
+- The remote experiment plan should first vary task granularity, inflight, connection fanout, event dispatcher count, worker count, runqueue capacity, and CPU affinity before adding new framework counters.

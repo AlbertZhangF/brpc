@@ -50,3 +50,66 @@
 - Static post-change review confirmed:
   - removed bvar names no longer appear in the touched code
   - default connection model is still reuse for same-address `single` channels unless `unique_connection_group=true`
+
+## 2026-04-29
+- Re-read planning files before starting the channel/server bthread documentation task.
+- Inspected the current client-side flow in:
+  - `src/brpc/channel.cpp`
+  - `src/brpc/controller.cpp`
+  - `src/brpc/socket.cpp`
+- Inspected the current server-side flow in:
+  - `src/brpc/server.cpp`
+  - `src/brpc/acceptor.cpp`
+  - `src/brpc/input_messenger.cpp`
+  - `src/brpc/policy/baidu_rpc_protocol.cpp`
+- Added `docs/cn/brpc_channel_server_bthread_flow.md`, covering:
+  - client `Channel` initialization and RPC send path
+  - client async completion callback bthread path
+  - server service registration and acceptor startup path
+  - socket event, input messenger, and RPC dispatch bthread creation paths
+  - client/server differences from the business bthread perspective
+- Updated `task_plan.md` and `findings.md` with the new documentation phase and source-level conclusions.
+- Did not run compilation because this change only adds documentation and planning records.
+
+## 2026-04-30
+- Expanded `docs/cn/brpc_channel_server_bthread_flow.md` to include:
+  - `controller.cpp` client completion, cancel, and retry helper bthread creation paths
+  - `socket.cpp` `ProcessEvent` creation conditions and `KeepWrite` write-continuation behavior
+  - `input_messenger.cpp` `QueueMessage` / `ProcessInputMessage` batching and `BTHREAD_NOSIGNAL` behavior
+  - full client and server bthread creation sequences from event dispatch to business callback/method execution
+- Updated `task_plan.md` and `findings.md` with the expanded source-level conclusions.
+- Static validation target remains source/document consistency; no compile is needed because only documentation and planning records changed.
+
+## 2026-04-30 rdma_performance mapping
+- Inspected `example/rdma_performance/client.cpp` and `server.cpp` to map benchmark-created bthreads onto the brpc framework bthread flow.
+- Updated `docs/cn/brpc_channel_server_bthread_flow.md` with:
+  - client `GenerateToken`, `RunClosedLoopWorker`, and `RunOpenLoopWorker` creation and responsibilities
+  - closed-loop callback-driven replenishment via `HandleResponse`
+  - open-loop worker-driven continuous sending
+  - `SendRequest` object/callback creation and `ConnectionSlot` round-robin selection
+  - server `PerfTestServiceImpl::Test` execution context and `ClosureGuard` response path
+- Updated `task_plan.md` and `findings.md` with the benchmark-specific bthread mapping.
+- No compile run; this remains a documentation-only change.
+
+## 2026-04-30 callback context and PlantUML
+- Inspected bthread creation and enqueue logic in:
+  - `src/bthread/bthread.cpp`
+  - `src/bthread/task_group.cpp`
+  - `src/bthread/task_control.cpp`
+  - `src/brpc/details/controller_private_accessor.h`
+  - `src/brpc/policy/baidu_rpc_protocol.cpp`
+- Confirmed normal successful response uses `OnVersionedRPCReturned(info, false, ...)`, so `rdma_performance` client `HandleResponse()` normally executes inline in the response-processing bthread rather than the original sending worker bthread.
+- Updated `docs/cn/brpc_channel_server_bthread_flow.md` to correct callback wording and add TaskGroup enqueue semantics.
+- Added two PlantUML diagrams covering complete benchmark client and server bthread creation flows with per-step creation/non-creation annotations.
+- No compile run; this remains a documentation-only change.
+
+## 2026-05-07 steal_task experiment plan
+- Inspected existing bthread and brpc observability points for `steal_task` remote diagnosis.
+- Added `docs/cn/steal_task_remote_experiment_plan.md` with:
+  - source-level mechanism summary
+  - remote command matrix
+  - perf, bvar, pidstat, ss collection commands
+  - experiments for task granularity, inflight, connection distribution, event dispatchers, worker count, runqueue capacity, and CPU affinity
+  - data recording template and conclusion rules
+- Updated `task_plan.md` and `findings.md` with the new documentation phase and experiment assumptions.
+- No compile run; this is a documentation-only change.
