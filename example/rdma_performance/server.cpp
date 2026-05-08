@@ -26,8 +26,16 @@
 
 #ifdef BRPC_WITH_RDMA
 
+namespace bthread {
+DECLARE_int32(bthread_concurrency);
+}
+
 DEFINE_int32(port, 8002, "TCP Port of this server");
 DEFINE_bool(use_rdma, true, "Use RDMA or not");
+DEFINE_int32(server_num_threads, -1,
+             "Number of brpc server worker threads. -1 keeps brpc default, "
+             "0 lets bthread_concurrency control the worker count, >0 sets "
+             "ServerOptions.num_threads explicitly");
 
 butil::atomic<uint64_t> g_last_time(0);
 
@@ -77,6 +85,14 @@ int main(int argc, char* argv[]) {
 
     brpc::ServerOptions options;
     options.use_rdma = FLAGS_use_rdma;
+    if (FLAGS_server_num_threads >= 0) {
+        options.num_threads = FLAGS_server_num_threads;
+    }
+    LOG(INFO) << "Starting rdma_performance_server"
+              << " port=" << FLAGS_port
+              << " use_rdma=" << (FLAGS_use_rdma ? "true" : "false")
+              << " server_num_threads=" << FLAGS_server_num_threads
+              << " bthread_concurrency=" << bthread::FLAGS_bthread_concurrency;
     if (server.Start(FLAGS_port, &options) != 0) {
         LOG(ERROR) << "Fail to start EchoServer";
         return -1;
