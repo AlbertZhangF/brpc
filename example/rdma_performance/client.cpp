@@ -18,8 +18,12 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cctype>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -58,6 +62,11 @@ DEFINE_int32(max_inflight, 0, "Global inflight limit in open_loop mode");
 DEFINE_bool(unique_connection_group, false,
             "Create a unique connection_group per Channel to prevent SocketMap reuse");
 DEFINE_bool(report_connection_stats, true, "Print connection-level counters");
+DEFINE_string(payload_format, "attachment",
+              "Payload format: attachment or raw_json");
+DEFINE_string(json_file, "", "Read raw JSON request body from this file");
+DEFINE_bool(json_echo_check, false,
+            "Check raw JSON response body equals request body when echo_attachment is true");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -74,12 +83,16 @@ butil::atomic<uint32_t> g_rr_index(0);
 butil::atomic<int64_t> g_token(10000);
 butil::atomic<int64_t> g_open_loop_inflight_limit(0);
 std::vector<std::string> g_servers;
+std::string g_json_payload;
 volatile bool g_stop = false;
 
 namespace {
 
 const char* kClosedLoop = "closed_loop";
 const char* kOpenLoop = "open_loop";
+const char* kPayloadAttachment = "attachment";
+const char* kPayloadRawJson = "raw_json";
+const char* kRawJsonPath = "/test.PerfTestService/Test";
 
 struct ConnectionSlot {
     explicit ConnectionSlot(int connection_index_in)
@@ -153,6 +166,70 @@ static bool IsOpenLoop() {
 
 static bool IsClosedLoop() {
     return FLAGS_load_mode == kClosedLoop;
+}
+
+static bool IsRawJsonPayload() {
+    return FLAGS_payload_format == kPayloadRawJson;
+}
+
+static bool IsAttachmentPayload() {
+    return FLAGS_payload_format == kPayloadAttachment;
+}
+
+static std::string LowerString(const std::string& value) {
+    std::string out = value;
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return out;
+}
+
+static bool IsRawJsonProtocolAllowed() {
+    const std::string protocol = LowerString(FLAGS_protocol);
+    return protocol == "http" || protocol == "h2";
+}
+
+static bool ReadFileToString(const std::string& path, std::string* output) {
+    std::ifstream input(path.c_str(), std::ios::in | std::ios::binary);
+    if (!input) {
+        LOG(ERROR) << "Fail to open json_file=" << path;
+        return false;
+    }
+    std::ostringstream oss;
+    oss << input.rdbuf();
+    *output = oss.str();
+    return true;
+}
+
+static std::string GenerateJsonPayload(int target_size) {
+    const std::string prefix = "{\"payload\":\"";
+    const std::string suffix = "\"}";
+    if (target_size <= (int)(prefix.size() + suffix.size())) {
+        return prefix + suffix;
+    }
+    return prefix + std::string(target_size - prefix.size() - suffix.size(), 'x') + suffix;
+}
+
+static bool InitRawJsonPayload(int attachment_size) {
+    if (!FLAGS_json_file.empty()) {
+        return ReadFileToString(FLAGS_json_file, &g_json_payload);
+    }
+    g_json_payload = GenerateJsonPayload(std::max(attachment_size, 0));
+    return true;
+}
+
+static std::string ExtractCpuUsageFromJson(const butil::IOBuf& body) {
+    const std::string text = body.to_string();
+    const std::string key = "\"cpu_usage\":\"";
+    size_t pos = text.find(key);
+    if (pos == std::string::npos) {
+        return "";
+    }
+    pos += key.size();
+    const size_t end = text.find('"', pos);
+    if (end == std::string::npos) {
+        return "";
+    }
+    return text.substr(pos, end - pos);
 }
 
 static uint64_t NowUs() {
@@ -273,11 +350,36 @@ static void HandleResponse(RespClosure* closure) {
 
     slot->completed.fetch_add(1, butil::memory_order_relaxed);
     g_latency_recorder << closure->cntl->latency_us();
-    if (!closure->resp->cpu_usage().empty()) {
+    if (!IsRawJsonPayload() && !closure->resp->cpu_usage().empty()) {
         g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
+    } else if (IsRawJsonPayload()) {
+        const std::string* cpu_header =
+                closure->cntl->http_response().GetHeader("X-Server-Cpu-Usage");
+        if (cpu_header != NULL && !cpu_header->empty()) {
+            g_server_cpu_recorder << atof(cpu_header->c_str()) * 100;
+        } else if (!worker->echo_attachment_flag) {
+            const std::string cpu_usage = ExtractCpuUsageFromJson(
+                    closure->cntl->response_attachment());
+            if (!cpu_usage.empty()) {
+                g_server_cpu_recorder << atof(cpu_usage.c_str()) * 100;
+            }
+        }
+        if (FLAGS_json_echo_check && worker->echo_attachment_flag) {
+            const std::string response_body =
+                    closure->cntl->response_attachment().to_string();
+            if (response_body != g_json_payload) {
+                slot->failed.fetch_add(1, butil::memory_order_relaxed);
+                g_failed_cnt.fetch_add(1, butil::memory_order_relaxed);
+                LOG(ERROR) << "Raw JSON echo check failed";
+                worker->stop = true;
+                g_stop = true;
+                return;
+            }
+        }
     }
-    g_total_bytes.fetch_add(
-            closure->cntl->request_attachment().size(), butil::memory_order_relaxed);
+    const size_t payload_bytes = IsRawJsonPayload() ?
+            g_json_payload.size() : closure->cntl->request_attachment().size();
+    g_total_bytes.fetch_add(payload_bytes, butil::memory_order_relaxed);
     g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
     UpdateClientCpuSample();
 
@@ -305,17 +407,27 @@ static void SendRequest(Worker* worker) {
     closure->worker = worker;
     closure->slot = slot;
     closure->cntl = new brpc::Controller();
-    closure->resp = new test::PerfTestResponse();
-
-    test::PerfTestRequest request;
-    request.set_echo_attachment(worker->echo_attachment_flag);
-    closure->cntl->request_attachment().append(worker->attachment);
+    closure->resp = IsRawJsonPayload() ? NULL : new test::PerfTestResponse();
+    if (IsRawJsonPayload()) {
+        closure->cntl->http_request().uri() = std::string(kRawJsonPath) +
+                "?echo_attachment=" + (worker->echo_attachment_flag ? "true" : "false");
+        closure->cntl->http_request().set_method(brpc::HTTP_METHOD_POST);
+        closure->cntl->http_request().set_content_type("application/json");
+        closure->cntl->request_attachment().append(g_json_payload);
+    }
     google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
-    test::PerfTestService_Stub stub(slot->channel);
     slot->sent.fetch_add(1, butil::memory_order_relaxed);
     int64_t inflight = g_inflight.fetch_add(1, butil::memory_order_relaxed) + 1;
     UpdatePeakInflight(inflight);
-    stub.Test(closure->cntl, &request, closure->resp, done);
+    if (IsRawJsonPayload()) {
+        slot->channel->CallMethod(NULL, closure->cntl, NULL, NULL, done);
+    } else {
+        test::PerfTestRequest request;
+        request.set_echo_attachment(worker->echo_attachment_flag);
+        closure->cntl->request_attachment().append(worker->attachment);
+        test::PerfTestService_Stub stub(slot->channel);
+        stub.Test(closure->cntl, &request, closure->resp, done);
+    }
 }
 
 static void* RunClosedLoopWorker(void* arg) {
@@ -382,11 +494,20 @@ static int InitConnectionSlots(int connection_num, bool echo_attachment) {
         }
 
         brpc::Controller cntl;
-        test::PerfTestResponse response;
-        test::PerfTestRequest request;
-        request.set_echo_attachment(echo_attachment);
-        test::PerfTestService_Stub stub(slot->channel);
-        stub.Test(&cntl, &request, &response, NULL);
+        if (IsRawJsonPayload()) {
+            cntl.http_request().uri() = std::string(kRawJsonPath) +
+                    "?echo_attachment=" + (echo_attachment ? "true" : "false");
+            cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
+            cntl.http_request().set_content_type("application/json");
+            cntl.request_attachment().append(g_json_payload);
+            slot->channel->CallMethod(NULL, &cntl, NULL, NULL, NULL);
+        } else {
+            test::PerfTestResponse response;
+            test::PerfTestRequest request;
+            request.set_echo_attachment(echo_attachment);
+            test::PerfTestService_Stub stub(slot->channel);
+            stub.Test(&cntl, &request, &response, NULL);
+        }
         if (cntl.Failed()) {
             LOG(ERROR) << "Warmup RPC failed on connection " << i << ": "
                        << cntl.ErrorText();
@@ -435,6 +556,7 @@ static void Test(int thread_num, int attachment_size) {
               << ", Attachment: " << attachment_size << "B"
               << ", RDMA: " << (FLAGS_use_rdma ? "yes" : "no")
               << ", Echo: " << (FLAGS_echo_attachment ? "yes" : "no")
+              << ", PayloadFormat: " << FLAGS_payload_format
               << ", LoadMode: " << FLAGS_load_mode
               << ", ConnectionType: " << FLAGS_connection_type
               << ", ConnectionNum: " << actual_connection_num
@@ -450,6 +572,10 @@ static void Test(int thread_num, int attachment_size) {
     } else {
         std::cout << "Open-loop keeps sending until max_inflight is hit, decoupled from worker count."
                   << std::endl;
+    }
+
+    if (IsRawJsonPayload() && !InitRawJsonPayload(attachment_size)) {
+        exit(1);
     }
 
     g_stop = false;
@@ -472,8 +598,9 @@ static void Test(int thread_num, int attachment_size) {
 
     std::vector<Worker*> workers;
     workers.reserve(thread_num);
+    const int worker_attachment_size = IsRawJsonPayload() ? 0 : attachment_size;
     for (int k = 0; k < thread_num; ++k) {
-        workers.push_back(new Worker(k, attachment_size, FLAGS_echo_attachment));
+        workers.push_back(new Worker(k, worker_attachment_size, FLAGS_echo_attachment));
     }
 
     uint64_t start_time = NowUs();
@@ -555,6 +682,16 @@ int main(int argc, char* argv[]) {
     if (!IsClosedLoop() && !IsOpenLoop()) {
         LOG(ERROR) << "Invalid load_mode=" << FLAGS_load_mode
                    << ", valid values are closed_loop and open_loop";
+        return -1;
+    }
+    if (!IsAttachmentPayload() && !IsRawJsonPayload()) {
+        LOG(ERROR) << "Invalid payload_format=" << FLAGS_payload_format
+                   << ", valid values are attachment and raw_json";
+        return -1;
+    }
+    if (IsRawJsonPayload() && !IsRawJsonProtocolAllowed()) {
+        LOG(ERROR) << "payload_format=raw_json requires --protocol=http or --protocol=h2, "
+                   << "but protocol=" << FLAGS_protocol;
         return -1;
     }
 

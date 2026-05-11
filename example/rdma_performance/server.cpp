@@ -50,20 +50,38 @@ public:
               PerfTestResponse* response,
               google::protobuf::Closure* done) {
         brpc::ClosureGuard done_guard(done);
+        brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         uint64_t now = butil::monotonic_time_us();
+        std::string cpu_usage;
         if (now > last && now - last > 100000) {
             if (g_last_time.exchange(now, butil::memory_order_relaxed) == last) {
-                response->set_cpu_usage(bvar::Variable::describe_exposed("process_cpu_usage"));
+                cpu_usage = bvar::Variable::describe_exposed("process_cpu_usage");
             } else {
-                response->set_cpu_usage("");
+                cpu_usage.clear();
             }
         } else {
-            response->set_cpu_usage("");
+            cpu_usage.clear();
         }
+        if (cntl->request_protocol() == brpc::PROTOCOL_HTTP ||
+            cntl->request_protocol() == brpc::PROTOCOL_H2) {
+            cntl->http_response().set_content_type("application/json");
+            cntl->http_response().SetHeader("X-Server-Cpu-Usage", cpu_usage);
+            const std::string* echo_param =
+                    cntl->http_request().uri().GetQuery("echo_attachment");
+            const bool echo = echo_param != NULL &&
+                    (*echo_param == "true" || *echo_param == "1");
+            if (echo) {
+                cntl->response_attachment().append(cntl->request_attachment());
+            } else {
+                cntl->response_attachment().append("{\"cpu_usage\":\"");
+                cntl->response_attachment().append(cpu_usage);
+                cntl->response_attachment().append("\"}");
+            }
+            return;
+        }
+        response->set_cpu_usage(cpu_usage);
         if (request->echo_attachment()) {
-            brpc::Controller* cntl =
-                static_cast<brpc::Controller*>(cntl_base);
             cntl->response_attachment().append(cntl->request_attachment());
         }
     }
@@ -76,8 +94,10 @@ int main(int argc, char* argv[]) {
     brpc::Server server;
     test::PerfTestServiceImpl perf_test_service_impl;
 
-    if (server.AddService(&perf_test_service_impl, 
-                          brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
+    brpc::ServiceOptions service_options;
+    service_options.ownership = brpc::SERVER_DOESNT_OWN_SERVICE;
+    service_options.allow_http_body_to_pb = false;
+    if (server.AddService(&perf_test_service_impl, service_options) != 0) {
         LOG(ERROR) << "Fail to add service";
         return -1;
     }
