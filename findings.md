@@ -83,3 +83,4 @@
 - The benchmark should not add default per-connection-slot throttling when the purpose is to stress pooled mode itself; that would hide part of the framework behavior under test.
 - The open-loop `max_inflight` check was previously approximate because workers checked the value before `SendRequest()` and incremented afterward. A CAS permit keeps `PeakInflight` within the user-configured global limit without reducing pressure below the requested limit.
 - Large request+echo payloads can still exceed `rpc_timeout_ms` under real load. The benchmark now warns about 1MB+ echo payloads with the default 2000ms timeout instead of silently relying on a small timeout.
+- For benchmark observability, runtime RPC failures should not abort the whole run. Counting failures and continuing provides QPS/latency/failure-rate evidence for overload regions; warmup failures remain fatal because the channel/route is not usable before measurement starts.

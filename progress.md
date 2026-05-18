@@ -126,3 +126,7 @@
 - Counted both `brpc::ERPCTIMEDOUT` and system `ETIMEDOUT` as timeout failures.
 - Added a warning for 1MB+ echo payloads with `--rpc_timeout_ms<=2000`.
 - `git diff --check` passed; local build is still unavailable because `build/` lacks generated `Makefile`/`build.ninja`.
+
+## 2026-05-18 continue after RPC failures
+- Updated `HandleResponse()` so RPC failures and raw JSON echo-check failures increment counters and continue the benchmark instead of setting `g_stop=true`.
+- Added shared response-completion helpers to keep closed-loop replenishment behavior consistent across success and failure paths.

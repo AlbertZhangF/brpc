@@ -356,6 +356,23 @@ static int64_t GetEffectiveInflightLimit() {
 
 static bool SendRequest(Worker* worker);
 
+static bool ShouldStopWorkerAfterResponse(Worker* worker) {
+    return ShouldStopByTime(worker->start_time_us) ||
+           (FLAGS_test_iterations > 0 &&
+            g_request_budget.load(butil::memory_order_relaxed) <= 0 &&
+            g_inflight.load(butil::memory_order_relaxed) <= 0);
+}
+
+static void ContinueClosedLoopIfNeeded(Worker* worker) {
+    if (ShouldStopWorkerAfterResponse(worker)) {
+        worker->stop = true;
+        return;
+    }
+    if (IsClosedLoop() && !g_stop && !worker->stop) {
+        SendRequest(worker);
+    }
+}
+
 static void HandleResponse(RespClosure* closure) {
     std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
     std::unique_ptr<test::PerfTestResponse> response_guard(closure->resp);
@@ -374,8 +391,7 @@ static void HandleResponse(RespClosure* closure) {
             g_timeout_cnt.fetch_add(1, butil::memory_order_relaxed);
         }
         LOG(ERROR) << "RPC call failed: " << closure->cntl->ErrorText();
-        worker->stop = true;
-        g_stop = true;
+        ContinueClosedLoopIfNeeded(worker);
         return;
     }
 
@@ -402,8 +418,7 @@ static void HandleResponse(RespClosure* closure) {
                 slot->failed.fetch_add(1, butil::memory_order_relaxed);
                 g_failed_cnt.fetch_add(1, butil::memory_order_relaxed);
                 LOG(ERROR) << "Raw JSON echo check failed";
-                worker->stop = true;
-                g_stop = true;
+                ContinueClosedLoopIfNeeded(worker);
                 return;
             }
         }
@@ -414,17 +429,7 @@ static void HandleResponse(RespClosure* closure) {
     g_total_cnt.fetch_add(1, butil::memory_order_relaxed);
     UpdateClientCpuSample();
 
-    if (ShouldStopByTime(worker->start_time_us) ||
-        (FLAGS_test_iterations > 0 &&
-         g_request_budget.load(butil::memory_order_relaxed) <= 0 &&
-         g_inflight.load(butil::memory_order_relaxed) <= 0)) {
-        worker->stop = true;
-        return;
-    }
-
-    if (IsClosedLoop() && !g_stop && !worker->stop) {
-        SendRequest(worker);
-    }
+    ContinueClosedLoopIfNeeded(worker);
 }
 
 static bool SendRequest(Worker* worker) {
