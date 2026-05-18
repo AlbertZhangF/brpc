@@ -139,3 +139,7 @@
 - Added tracking of outstanding async RPC `CallId` values in `rdma_performance_client`.
 - Added `--cancel_inflight_on_stop=true` and `--stop_grace_ms=5000`.
 - On timed stop, the client now sets `g_stop`, cancels outstanding RPCs, suppresses post-stop failure log spam, and exits after the grace period with a summary if in-flight requests still remain.
+
+## 2026-05-18 suppress per-RPC error logs
+- Added `--log_rpc_error=false` to control whether each RPC failure is printed.
+- Default behavior now suppresses per-request `RPC call failed` logs and keeps final `Failed/Timeout` counters.

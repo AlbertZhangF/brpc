@@ -64,6 +64,8 @@ DEFINE_int32(stop_grace_ms, 5000,
              "Max time to wait for in-flight RPCs after test_seconds is reached");
 DEFINE_bool(cancel_inflight_on_stop, true,
             "Cancel outstanding asynchronous RPCs when the timed test stops");
+DEFINE_bool(log_rpc_error, false,
+            "Print each failed RPC. Disabled by default to avoid log flooding under overload");
 DEFINE_int32(test_iterations, 0, "Total request budget, 0 means time-based run");
 DEFINE_int32(dummy_port, 8001, "Dummy server port number");
 DEFINE_string(load_mode, "closed_loop", "Load mode of the client: closed_loop or open_loop");
@@ -425,7 +427,7 @@ static void HandleResponse(RespClosure* closure) {
             slot->timeouts.fetch_add(1, butil::memory_order_relaxed);
             g_timeout_cnt.fetch_add(1, butil::memory_order_relaxed);
         }
-        if (!g_stop) {
+        if (FLAGS_log_rpc_error && !g_stop) {
             LOG(ERROR) << "RPC call failed: " << closure->cntl->ErrorText();
         }
         ContinueClosedLoopIfNeeded(worker);

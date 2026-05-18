@@ -94,3 +94,4 @@
 - With very large payloads and high `max_inflight`, reaching `test_seconds` only stops new sends; the old loop waited for `g_inflight==0`, so a large `rpc_timeout_ms` could keep the process alive for a long time while outstanding RPCs failed.
 - brpc exposes `StartCancel(CallId)` for asynchronous RPC cancellation. Tracking call ids lets the benchmark cancel outstanding requests when the timed run stops.
 - Error logging after timed stop should be suppressed because final `Failed/Timeout` counters are the useful signal; otherwise canceled or overcrowded callbacks can flood stderr after the measurement window.
+- Per-RPC failure logging is too noisy for overload experiments such as `EOVERCROWDED`; a flag-controlled log keeps final counters while avoiding stderr flooding.

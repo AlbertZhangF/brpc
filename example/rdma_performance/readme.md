@@ -92,6 +92,7 @@ taskset -c 112-127 ./example/rdma_performance/rdma_performance_server \
 | `--connect_timeout_ms` | `-1` | TCP 连接建立超时。`-1` 表示使用 `rpc_timeout_ms`。 |
 | `--stop_grace_ms` | `5000` | 到达 `test_seconds` 后等待 in-flight RPC 结束的最长时间，单位 ms。`-1` 表示一直等待。 |
 | `--cancel_inflight_on_stop` | `true` | 到达 `test_seconds` 后是否对未完成异步 RPC 调用 `brpc::StartCancel()`。 |
+| `--log_rpc_error` | `false` | 是否逐条打印 RPC 失败日志。默认关闭，避免过载场景下刷屏；失败仍会计入最终 `Failed/Timeout`。 |
 
 ### 3.3 Payload 参数
 
