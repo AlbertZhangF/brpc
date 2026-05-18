@@ -143,3 +143,7 @@
 ## 2026-05-18 suppress per-RPC error logs
 - Added `--log_rpc_error=false` to control whether each RPC failure is printed.
 - Default behavior now suppresses per-request `RPC call failed` logs and keeps final `Failed/Timeout` counters.
+
+## 2026-05-18 low-QPS formatting
+- Added QPS formatting that computes real QPS with floating point precision.
+- QPS values below 1000 now print as raw QPS instead of `0k`; values at or above 1000 still print in `k`.

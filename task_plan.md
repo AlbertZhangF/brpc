@@ -24,6 +24,7 @@ Implement the approved `use_rdma=false` benchmarking and observability changes f
 | 16. Continue benchmark after RPC failures | completed | Changed client response handling to count failures/timeouts and continue the run instead of stopping on first RPC failure. |
 | 17. Add rdma_performance README | completed | Added `example/rdma_performance/readme.md` documenting server/client flags, models, examples, and observability commands. |
 | 18. Bound shutdown time after test_seconds | completed | Added outstanding RPC cancellation and stop grace timeout so large-payload runs exit after the configured test duration. |
+| 19. Fix low-QPS output formatting | completed | Changed QPS printing from integer K-QPS truncation to floating-point formatting with raw QPS below 1000. |
 
 ## Decisions
 - Implement in the current clean feature branch instead of creating a new worktree.

@@ -26,6 +26,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -73,7 +74,7 @@ DEFINE_int32(connection_num, 0, "How many Channel instances should be created");
 DEFINE_int32(max_inflight, 0, "Global inflight limit in open_loop mode");
 DEFINE_bool(unique_connection_group, false,
             "Create a unique connection_group per Channel to prevent SocketMap reuse");
-DEFINE_bool(report_connection_stats, true, "Print connection-level counters");
+DEFINE_bool(report_connection_stats, false, "Print connection-level counters");
 DEFINE_string(payload_format, "attachment",
               "Payload format: attachment or raw_json");
 DEFINE_string(json_file, "", "Read raw JSON request body from this file");
@@ -354,6 +355,21 @@ static void CancelOutstandingRpc() {
     if (!ids.empty()) {
         LOG(WARNING) << "Canceled " << ids.size() << " outstanding RPCs";
     }
+}
+
+static std::string FormatQps(uint64_t completed_count, uint64_t elapsed_us) {
+    if (elapsed_us == 0) {
+        return "0.000";
+    }
+    const double qps = completed_count * 1000000.0 / elapsed_us;
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3);
+    if (qps >= 1000.0) {
+        oss << qps / 1000.0 << "k";
+    } else {
+        oss << qps;
+    }
+    return oss.str();
 }
 
 static void UpdateClientCpuSample() {
@@ -770,10 +786,9 @@ static void Test(int thread_num, int attachment_size) {
                   << ", 99th-Latency: " << g_latency_recorder.latency_percentile(0.99)
                   << ", 99.9th-Latency: " << g_latency_recorder.latency_percentile(0.999)
                   << ", Throughput: " << throughput << "MB/s"
-                  << ", QPS: "
-                  << (g_total_cnt.load(butil::memory_order_relaxed) * 1000 /
-                      (end_time - start_time))
-                  << "k"
+                  << ", QPS: " << FormatQps(
+                          g_total_cnt.load(butil::memory_order_relaxed),
+                          end_time - start_time)
                   << ", Failed: " << g_failed_cnt.load(butil::memory_order_relaxed)
                   << ", Timeout: " << g_timeout_cnt.load(butil::memory_order_relaxed)
                   << ", PeakInflight: " << g_peak_inflight.load(butil::memory_order_relaxed)

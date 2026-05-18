@@ -156,7 +156,7 @@ client 结束时输出：
 | `Avg-Latency` | client 观察到的平均延迟。 |
 | `90th/99th/99.9th-Latency` | 延迟分位数。 |
 | `Throughput` | 按请求 payload 字节估算的吞吐，单位 MB/s。 |
-| `QPS` | 成功完成请求数除以运行时间。 |
+| `QPS` | 成功完成请求数除以运行时间。`>=1000` 时以 `k` 为单位显示，小于 `1000` 时显示真实 QPS 数值。 |
 | `Completed` | `test_iterations>0` 时输出，表示成功完成请求数。 |
 | `Failed` | RPC 失败次数，包括连接失败、超时、echo check 失败等。 |
 | `Timeout` | 超时次数，包括 brpc RPC timeout 和系统 `ETIMEDOUT`。 |

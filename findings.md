@@ -95,3 +95,4 @@
 - brpc exposes `StartCancel(CallId)` for asynchronous RPC cancellation. Tracking call ids lets the benchmark cancel outstanding requests when the timed run stops.
 - Error logging after timed stop should be suppressed because final `Failed/Timeout` counters are the useful signal; otherwise canceled or overcrowded callbacks can flood stderr after the measurement window.
 - Per-RPC failure logging is too noisy for overload experiments such as `EOVERCROWDED`; a flag-controlled log keeps final counters while avoiding stderr flooding.
+- The old QPS output used integer K-QPS arithmetic, so any successful throughput below 1000 QPS was displayed as `0k`. The formatter should calculate real QPS as floating point and only append `k` when QPS is at least 1000.
