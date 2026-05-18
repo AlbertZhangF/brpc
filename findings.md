@@ -84,3 +84,13 @@
 - The open-loop `max_inflight` check was previously approximate because workers checked the value before `SendRequest()` and incremented afterward. A CAS permit keeps `PeakInflight` within the user-configured global limit without reducing pressure below the requested limit.
 - Large request+echo payloads can still exceed `rpc_timeout_ms` under real load. The benchmark now warns about 1MB+ echo payloads with the default 2000ms timeout instead of silently relying on a small timeout.
 - For benchmark observability, runtime RPC failures should not abort the whole run. Counting failures and continuing provides QPS/latency/failure-rate evidence for overload regions; warmup failures remain fatal because the channel/route is not usable before measurement starts.
+
+## rdma_performance README findings
+- Current server-facing custom flags are `port`, `use_rdma`, `server_num_threads`, `server_bind_bthread_workers`, and `server_worker_affinity_cpus`; worker count can also be affected by global bthread flags such as `bthread_concurrency`.
+- Current client-facing custom flags cover worker count, closed/open-loop load model, explicit connection slots, timeout controls, payload format, raw JSON input, and per-slot stats.
+- The README should explicitly state that `connection_num` is a logical `Channel/ConnectionSlot` count, not a guaranteed true TCP connection count, especially under `pooled`.
+
+## Timed shutdown findings
+- With very large payloads and high `max_inflight`, reaching `test_seconds` only stops new sends; the old loop waited for `g_inflight==0`, so a large `rpc_timeout_ms` could keep the process alive for a long time while outstanding RPCs failed.
+- brpc exposes `StartCancel(CallId)` for asynchronous RPC cancellation. Tracking call ids lets the benchmark cancel outstanding requests when the timed run stops.
+- Error logging after timed stop should be suppressed because final `Failed/Timeout` counters are the useful signal; otherwise canceled or overcrowded callbacks can flood stderr after the measurement window.

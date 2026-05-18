@@ -22,6 +22,8 @@ Implement the approved `use_rdma=false` benchmarking and observability changes f
 | 14. Analyze high C2C after worker affinity | in_progress | Worker pthread pinning did not reduce C2C or improve performance; investigate non-migration causes and design remote validation experiments. |
 | 15. Minimal pooled open_loop large attachment timeout fix | completed | Added configurable connect timeout and strict enforcement of user-provided global `max_inflight` without adding default per-connection throttling. |
 | 16. Continue benchmark after RPC failures | completed | Changed client response handling to count failures/timeouts and continue the run instead of stopping on first RPC failure. |
+| 17. Add rdma_performance README | completed | Added `example/rdma_performance/readme.md` documenting server/client flags, models, examples, and observability commands. |
+| 18. Bound shutdown time after test_seconds | completed | Added outstanding RPC cancellation and stop grace timeout so large-payload runs exit after the configured test duration. |
 
 ## Decisions
 - Implement in the current clean feature branch instead of creating a new worktree.

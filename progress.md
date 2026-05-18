@@ -130,3 +130,12 @@
 ## 2026-05-18 continue after RPC failures
 - Updated `HandleResponse()` so RPC failures and raw JSON echo-check failures increment counters and continue the benchmark instead of setting `g_stop=true`.
 - Added shared response-completion helpers to keep closed-loop replenishment behavior consistent across success and failure paths.
+
+## 2026-05-18 rdma_performance README
+- Added `example/rdma_performance/readme.md`.
+- Documented server flags, client flags, payload modes, load modes, connection semantics, output fields, example commands, and system-side observation commands.
+
+## 2026-05-18 timed shutdown for large inflight runs
+- Added tracking of outstanding async RPC `CallId` values in `rdma_performance_client`.
+- Added `--cancel_inflight_on_stop=true` and `--stop_grace_ms=5000`.
+- On timed stop, the client now sets `g_stop`, cancels outstanding RPCs, suppresses post-stop failure log spam, and exits after the grace period with a summary if in-flight requests still remain.
