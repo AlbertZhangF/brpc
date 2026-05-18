@@ -113,3 +113,16 @@
   - data recording template and conclusion rules
 - Updated `task_plan.md` and `findings.md` with the new documentation phase and experiment assumptions.
 - No compile run; this is a documentation-only change.
+
+## 2026-05-15 C2C after worker affinity
+- Investigated why strict brpc worker pthread affinity did not reduce C2C or improve throughput.
+- Re-read bthread scheduling, runqueue, remote queue, socket event, input messenger, and event dispatcher code paths.
+- Key conclusion: high C2C is likely not caused by OS worker migration. More likely sources are bthread task stealing, shared runqueue metadata, socket/event state shared across workers, IOBuf/resource-pool cache lines, and global bvar/stat counters.
+- Updated `task_plan.md` and `findings.md` with the new C2C diagnosis phase and source-level hypotheses.
+
+## 2026-05-18 minimal pooled open_loop timeout fix
+- Updated `example/rdma_performance/client.cpp` to add `--connect_timeout_ms`; default `-1` makes connection establishment timeout follow `--rpc_timeout_ms`.
+- Changed open-loop inflight accounting to acquire a CAS permit before creating RPC objects, so the benchmark honors the configured global `--max_inflight` without adding default per-connection-slot throttling.
+- Counted both `brpc::ERPCTIMEDOUT` and system `ETIMEDOUT` as timeout failures.
+- Added a warning for 1MB+ echo payloads with `--rpc_timeout_ms<=2000`.
+- `git diff --check` passed; local build is still unavailable because `build/` lacks generated `Makefile`/`build.ninja`.

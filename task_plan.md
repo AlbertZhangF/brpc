@@ -19,6 +19,8 @@ Implement the approved `use_rdma=false` benchmarking and observability changes f
 | 11. Add rdma_performance bthread mapping | completed | Supplemented the bthread flow document with benchmark client worker/token bthreads and server service execution context. |
 | 12. Add PlantUML bthread creation diagrams | completed | Added client/server PlantUML flows and clarified normal client callback execution context and TaskGroup enqueue semantics. |
 | 13. Write steal_task remote experiment plan | completed | Added `docs/cn/steal_task_remote_experiment_plan.md` with remote commands, metrics, test matrix, and conclusion rules. |
+| 14. Analyze high C2C after worker affinity | in_progress | Worker pthread pinning did not reduce C2C or improve performance; investigate non-migration causes and design remote validation experiments. |
+| 15. Minimal pooled open_loop large attachment timeout fix | completed | Added configurable connect timeout and strict enforcement of user-provided global `max_inflight` without adding default per-connection throttling. |
 
 ## Decisions
 - Implement in the current clean feature branch instead of creating a new worktree.
@@ -42,3 +44,5 @@ Implement the approved `use_rdma=false` benchmarking and observability changes f
 - The benchmark mapping is based on current `example/rdma_performance` code and should be refreshed if the client open-loop permit implementation changes later.
 - PlantUML diagrams document source-level creation points only; actual execution group may differ due to bthread work stealing.
 - The steal_task experiment plan assumes remote machines can run perf, curl brpc vars, pidstat, ss, and the current rdma_performance binaries.
+- Worker pthread affinity only eliminates OS migration of `brpc_wkr` pthreads. It does not prevent bthread task stealing, socket ownership movement, shared bvar/resource-pool access, or cross-core cache-line transfers in shared queues and counters.
+- For large `pooled + open_loop` payloads, keep client-side pressure controls minimal: honor the configured global `max_inflight`, but do not add default per-connection throttling.

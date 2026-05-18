@@ -69,3 +69,17 @@
 - Server high-QPS request path mainly creates `ProcessInputMessage` from worker context, so most request tasks initially enter local `_rq`, not randomly selected `_remote_rq`.
 - Existing bvars can provide coarse observation through `bthread_group_status`, `bthread_worker_usage*`, `bthread_count*`, and worker counts; perf is still required to attribute CPU to `steal_task` and request-processing frames.
 - The remote experiment plan should first vary task granularity, inflight, connection fanout, event dispatcher count, worker count, runqueue capacity, and CPU affinity before adding new framework counters.
+
+## C2C after worker affinity findings
+- Worker pthread pinning only fixes OS-level migration of `brpc_wkr` pthreads. It does not bind bthread logical tasks to the worker that created them; `TaskControl::steal_task()` can still move ready tasks across TaskGroups.
+- `WorkStealingQueue` exposes shared `_top` and `_bottom` cache lines to owner pop/push and remote steal operations. High steal frequency can therefore create C2C even when pthreads are pinned.
+- `RemoteTaskQueue` is protected by a mutex and is read by the owner group plus other scheduling paths; remote enqueue/dequeue can create cross-core cache traffic if non-worker or incompatible-tag creation is frequent.
+- Server request handling uses `Socket::StartInputEvent()` to create `ProcessEvent` and `InputMessenger::QueueMessage()` to create `ProcessInputMessage`. The message/socket data may be read on one worker and processed or stolen by another.
+- `Socket` state, `_nevent`, `_write_head`, write requests, IOBuf block references, bvar counters, and resource-pool metadata are plausible shared cache-line sources on the server fast path.
+- Event dispatcher threads are bthreads and may run on worker pthreads. `event_dispatcher_num` and connection distribution can change which workers create `ProcessEvent` and where socket read work starts.
+
+## Minimal large attachment timeout findings
+- brpc `ChannelOptions` defaults `connect_timeout_ms` to 200ms, while the benchmark previously only set `timeout_ms=rpc_timeout_ms`. In `pooled` mode with large echo payloads, new pooled sockets may hit connection timeout under accept/backlog/socket pressure before the RPC-level 2000ms timeout is reached.
+- The benchmark should not add default per-connection-slot throttling when the purpose is to stress pooled mode itself; that would hide part of the framework behavior under test.
+- The open-loop `max_inflight` check was previously approximate because workers checked the value before `SendRequest()` and incremented afterward. A CAS permit keeps `PeakInflight` within the user-configured global limit without reducing pressure below the requested limit.
+- Large request+echo payloads can still exceed `rpc_timeout_ms` under real load. The benchmark now warns about 1MB+ echo payloads with the default 2000ms timeout instead of silently relying on a small timeout.

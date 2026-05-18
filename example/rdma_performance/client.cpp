@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <errno.h>
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -53,6 +55,8 @@ DEFINE_string(protocol, "baidu_std", "Protocol type.");
 DEFINE_string(servers, "0.0.0.0:8002+0.0.0.0:8002", "IP Address of servers");
 DEFINE_bool(use_rdma, true, "Use RDMA or not");
 DEFINE_int32(rpc_timeout_ms, 2000, "RPC call timeout");
+DEFINE_int32(connect_timeout_ms, -1,
+             "Connection establishment timeout. -1 means use rpc_timeout_ms");
 DEFINE_int32(test_seconds, 20, "Test running time");
 DEFINE_int32(test_iterations, 0, "Total request budget, 0 means time-based run");
 DEFINE_int32(dummy_port, 8001, "Dummy server port number");
@@ -288,13 +292,32 @@ static bool TryAcquireRequestPermit(uint64_t start_time_us) {
     if (g_stop || ShouldStopByTime(start_time_us)) {
         return false;
     }
-    if (!ConsumeRequestBudget()) {
-        return false;
-    }
     if (!AcquireQpsToken()) {
         return false;
     }
     return true;
+}
+
+static bool TryAcquireInflightPermit(int64_t limit) {
+    if (limit <= 0) {
+        const int64_t inflight =
+                g_inflight.fetch_add(1, butil::memory_order_relaxed) + 1;
+        UpdatePeakInflight(inflight);
+        return true;
+    }
+    int64_t old_value = g_inflight.load(butil::memory_order_relaxed);
+    while (old_value < limit) {
+        if (g_inflight.compare_exchange_weak(
+                    old_value, old_value + 1, butil::memory_order_relaxed)) {
+            UpdatePeakInflight(old_value + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ReleaseInflightPermit() {
+    g_inflight.fetch_sub(1, butil::memory_order_relaxed);
 }
 
 static void UpdateClientCpuSample() {
@@ -324,7 +347,14 @@ static void* GenerateToken(void* arg) {
     return NULL;
 }
 
-static void SendRequest(Worker* worker);
+static int64_t GetEffectiveInflightLimit() {
+    if (!IsOpenLoop()) {
+        return 0;
+    }
+    return g_open_loop_inflight_limit.load(butil::memory_order_relaxed);
+}
+
+static bool SendRequest(Worker* worker);
 
 static void HandleResponse(RespClosure* closure) {
     std::unique_ptr<brpc::Controller> cntl_guard(closure->cntl);
@@ -333,12 +363,13 @@ static void HandleResponse(RespClosure* closure) {
     ConnectionSlot* slot = closure->slot;
     Worker* worker = closure->worker;
 
-    g_inflight.fetch_sub(1, butil::memory_order_relaxed);
+    ReleaseInflightPermit();
 
     if (closure->cntl->Failed()) {
         slot->failed.fetch_add(1, butil::memory_order_relaxed);
         g_failed_cnt.fetch_add(1, butil::memory_order_relaxed);
-        if (closure->cntl->ErrorCode() == brpc::ERPCTIMEDOUT) {
+        if (closure->cntl->ErrorCode() == brpc::ERPCTIMEDOUT ||
+            closure->cntl->ErrorCode() == ETIMEDOUT) {
             slot->timeouts.fetch_add(1, butil::memory_order_relaxed);
             g_timeout_cnt.fetch_add(1, butil::memory_order_relaxed);
         }
@@ -396,10 +427,19 @@ static void HandleResponse(RespClosure* closure) {
     }
 }
 
-static void SendRequest(Worker* worker) {
+static bool SendRequest(Worker* worker) {
     if (!TryAcquireRequestPermit(worker->start_time_us)) {
         worker->stop = true;
-        return;
+        return false;
+    }
+    const int64_t inflight_limit = GetEffectiveInflightLimit();
+    if (!TryAcquireInflightPermit(inflight_limit)) {
+        return false;
+    }
+    if (!ConsumeRequestBudget()) {
+        ReleaseInflightPermit();
+        worker->stop = true;
+        return false;
     }
 
     ConnectionSlot* slot = PickConnectionSlot();
@@ -417,8 +457,6 @@ static void SendRequest(Worker* worker) {
     }
     google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
     slot->sent.fetch_add(1, butil::memory_order_relaxed);
-    int64_t inflight = g_inflight.fetch_add(1, butil::memory_order_relaxed) + 1;
-    UpdatePeakInflight(inflight);
     if (IsRawJsonPayload()) {
         slot->channel->CallMethod(NULL, closure->cntl, NULL, NULL, done);
     } else {
@@ -428,6 +466,7 @@ static void SendRequest(Worker* worker) {
         test::PerfTestService_Stub stub(slot->channel);
         stub.Test(closure->cntl, &request, closure->resp, done);
     }
+    return true;
 }
 
 static void* RunClosedLoopWorker(void* arg) {
@@ -461,7 +500,9 @@ static void* RunOpenLoopWorker(void* arg) {
             bthread_usleep(50);
             continue;
         }
-        SendRequest(worker);
+        if (!SendRequest(worker) && !worker->stop && !g_stop) {
+            bthread_usleep(50);
+        }
     }
     return NULL;
 }
@@ -483,6 +524,8 @@ static int InitConnectionSlots(int connection_num, bool echo_attachment) {
         options.use_rdma = FLAGS_use_rdma;
         options.protocol = FLAGS_protocol;
         options.connection_type = FLAGS_connection_type;
+        options.connect_timeout_ms =
+                FLAGS_connect_timeout_ms >= 0 ? FLAGS_connect_timeout_ms : FLAGS_rpc_timeout_ms;
         options.timeout_ms = FLAGS_rpc_timeout_ms;
         options.max_retry = 0;
         options.connection_group = slot->connection_group;
@@ -551,6 +594,8 @@ static void Test(int thread_num, int attachment_size) {
     const int64_t open_loop_inflight_limit =
             FLAGS_max_inflight > 0 ? FLAGS_max_inflight :
             (int64_t)thread_num * FLAGS_queue_depth;
+    const int connect_timeout_ms =
+            FLAGS_connect_timeout_ms >= 0 ? FLAGS_connect_timeout_ms : FLAGS_rpc_timeout_ms;
     std::cout << "[Threads: " << thread_num
               << ", Depth: " << FLAGS_queue_depth
               << ", Attachment: " << attachment_size << "B"
@@ -560,6 +605,8 @@ static void Test(int thread_num, int attachment_size) {
               << ", LoadMode: " << FLAGS_load_mode
               << ", ConnectionType: " << FLAGS_connection_type
               << ", ConnectionNum: " << actual_connection_num
+              << ", RpcTimeoutMs: " << FLAGS_rpc_timeout_ms
+              << ", ConnectTimeoutMs: " << connect_timeout_ms
               << ", UniqueConnectionGroup: "
               << (FLAGS_unique_connection_group ? "true" : "false")
               << ", ModelConcurrency: "
@@ -576,6 +623,13 @@ static void Test(int thread_num, int attachment_size) {
 
     if (IsRawJsonPayload() && !InitRawJsonPayload(attachment_size)) {
         exit(1);
+    }
+    const size_t request_bytes = IsRawJsonPayload() ?
+            g_json_payload.size() : std::max(attachment_size, 0);
+    if (request_bytes >= 1024000 && FLAGS_echo_attachment && FLAGS_rpc_timeout_ms <= 2000) {
+        LOG(WARNING) << "Large echo payload with rpc_timeout_ms=" << FLAGS_rpc_timeout_ms
+                     << " may hit normal RPC timeout under pooled/open_loop pressure. "
+                     << "Consider --rpc_timeout_ms=10000 or higher for large-payload tests.";
     }
 
     g_stop = false;
@@ -692,6 +746,10 @@ int main(int argc, char* argv[]) {
     if (IsRawJsonPayload() && !IsRawJsonProtocolAllowed()) {
         LOG(ERROR) << "payload_format=raw_json requires --protocol=http or --protocol=h2, "
                    << "but protocol=" << FLAGS_protocol;
+        return -1;
+    }
+    if (FLAGS_connect_timeout_ms < -1) {
+        LOG(ERROR) << "connect_timeout_ms must be >= -1";
         return -1;
     }
 
