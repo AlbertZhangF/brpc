@@ -22,6 +22,7 @@ package test;
 
 message PerfTestRequest {
       required bool echo_attachment = 1;
+      optional bool minimal_response = 2 [default = false];
 };
 
 message PerfTestResponse {

@@ -153,3 +153,12 @@
 - Removed default per-RPC call-id tracking, global mutex, and unordered set maintenance from `rdma_performance_client`.
 - Restored open-loop inflight accounting to the lower-overhead `fetch_add` style used by the earlier benchmark model.
 - Kept lightweight fixes: connection timeout option, failure counting without per-RPC logging, low-QPS formatting, and stop grace timeout.
+
+## 2026-05-20 minimal response mode
+- Added `PerfTestRequest.minimal_response` to request a benchmark-level minimal protobuf response path.
+- Added client flags `--response_mode=normal|minimal` and `--record_latency=true|false`.
+- In `response_mode=minimal`, the client passes a `NULL` response message so brpc completes the RPC without deserializing `PerfTestResponse`.
+- In server minimal mode, skipped CPU sampling and returned an initialized empty `cpu_usage` field while preserving optional attachment echo.
+- Updated `example/rdma_performance/readme.md` with the new flags, minimal-response command, and output caveats.
+- `git diff --check` passed.
+- Local CMake configure/build did not complete because this machine lacks the configured protobuf include path `/home/zfz/ins/protobuf/include/google/protobuf/stubs/common.h` and CMake could not find the brpc output path.

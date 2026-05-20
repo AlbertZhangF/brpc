@@ -101,3 +101,9 @@
 - Comparing against `da77da061393c8c0afd22ae01d41482a824f5a2e`, the largest new client hot-path cost was per-RPC `Controller::call_id()` plus global `mutex/unordered_set` insert/delete for cancellation tracking.
 - Strict CAS inflight permits also add contention in open-loop high-concurrency runs. Restoring the old `RunOpenLoopWorker` pre-check plus `SendRequest()` `fetch_add` keeps the configured inflight as an approximate cap with lower overhead.
 - `connect_timeout_ms`, QPS formatting, and per-RPC error-log suppression are not request hot-path costs or are negligible compared with RPC send/response handling, so they can remain.
+
+## Minimal response mode findings
+- In `baidu_std`, the framework still needs response meta and correlation id completion; the benchmark cannot remove response completion entirely without changing brpc protocol behavior.
+- The benchmark can avoid its own response payload cost by passing `NULL` as the client response message. `ProcessRpcResponse()` then skips protobuf response deserialization while still completing the controller and callback.
+- Server `minimal_response=true` avoids the periodic `process_cpu_usage` bvar lookup and only sets `PerfTestResponse.cpu_usage` to an empty initialized value to satisfy proto2 required-field semantics.
+- `record_latency=false` avoids writing the shared latency recorder on every completed RPC, which is useful for open-loop QPS ceiling tests but removes latency percentile observability.

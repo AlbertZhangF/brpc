@@ -81,6 +81,10 @@ DEFINE_string(payload_format, "attachment",
 DEFINE_string(json_file, "", "Read raw JSON request body from this file");
 DEFINE_bool(json_echo_check, false,
             "Check raw JSON response body equals request body when echo_attachment is true");
+DEFINE_string(response_mode, "normal",
+              "Response handling mode for protobuf payload: normal or minimal");
+DEFINE_bool(record_latency, true,
+            "Record latency percentiles. Disable for max-throughput tests to reduce client-side stats overhead");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
@@ -108,6 +112,8 @@ const char* kClosedLoop = "closed_loop";
 const char* kOpenLoop = "open_loop";
 const char* kPayloadAttachment = "attachment";
 const char* kPayloadRawJson = "raw_json";
+const char* kResponseModeNormal = "normal";
+const char* kResponseModeMinimal = "minimal";
 const char* kRawJsonPath = "/test.PerfTestService/Test";
 
 struct ConnectionSlot {
@@ -192,6 +198,14 @@ static bool IsRawJsonPayload() {
 
 static bool IsAttachmentPayload() {
     return FLAGS_payload_format == kPayloadAttachment;
+}
+
+static bool IsMinimalResponseMode() {
+    return FLAGS_response_mode == kResponseModeMinimal;
+}
+
+static bool IsNormalResponseMode() {
+    return FLAGS_response_mode == kResponseModeNormal;
 }
 
 static std::string LowerString(const std::string& value) {
@@ -433,8 +447,11 @@ static void HandleResponse(RespClosure* closure) {
     }
 
     slot->completed.fetch_add(1, butil::memory_order_relaxed);
-    g_latency_recorder << closure->cntl->latency_us();
-    if (!IsRawJsonPayload() && !closure->resp->cpu_usage().empty()) {
+    if (FLAGS_record_latency) {
+        g_latency_recorder << closure->cntl->latency_us();
+    }
+    if (!IsRawJsonPayload() && closure->resp != NULL &&
+        !closure->resp->cpu_usage().empty()) {
         g_server_cpu_recorder << atof(closure->resp->cpu_usage().c_str()) * 100;
     } else if (IsRawJsonPayload()) {
         const std::string* cpu_header =
@@ -482,7 +499,9 @@ static bool SendRequest(Worker* worker) {
     closure->worker = worker;
     closure->slot = slot;
     closure->cntl = new brpc::Controller();
-    closure->resp = IsRawJsonPayload() ? NULL : new test::PerfTestResponse();
+    closure->resp =
+            (IsRawJsonPayload() || IsMinimalResponseMode()) ?
+            NULL : new test::PerfTestResponse();
     closure->track_call_id = FLAGS_cancel_inflight_on_stop;
     if (closure->track_call_id) {
         closure->call_id = closure->cntl->call_id();
@@ -504,6 +523,7 @@ static bool SendRequest(Worker* worker) {
     } else {
         test::PerfTestRequest request;
         request.set_echo_attachment(worker->echo_attachment_flag);
+        request.set_minimal_response(IsMinimalResponseMode());
         closure->cntl->request_attachment().append(worker->attachment);
         test::PerfTestService_Stub stub(slot->channel);
         stub.Test(closure->cntl, &request, closure->resp, done);
@@ -590,8 +610,10 @@ static int InitConnectionSlots(int connection_num, bool echo_attachment) {
             test::PerfTestResponse response;
             test::PerfTestRequest request;
             request.set_echo_attachment(echo_attachment);
+            request.set_minimal_response(IsMinimalResponseMode());
             test::PerfTestService_Stub stub(slot->channel);
-            stub.Test(&cntl, &request, &response, NULL);
+            stub.Test(&cntl, &request,
+                      IsMinimalResponseMode() ? NULL : &response, NULL);
         }
         if (cntl.Failed()) {
             LOG(ERROR) << "Warmup RPC failed on connection " << i << ": "
@@ -644,6 +666,8 @@ static void Test(int thread_num, int attachment_size) {
               << ", RDMA: " << (FLAGS_use_rdma ? "yes" : "no")
               << ", Echo: " << (FLAGS_echo_attachment ? "yes" : "no")
               << ", PayloadFormat: " << FLAGS_payload_format
+              << ", ResponseMode: " << FLAGS_response_mode
+              << ", RecordLatency: " << (FLAGS_record_latency ? "true" : "false")
               << ", LoadMode: " << FLAGS_load_mode
               << ", ConnectionType: " << FLAGS_connection_type
               << ", ConnectionNum: " << actual_connection_num
@@ -759,19 +783,32 @@ static void Test(int thread_num, int attachment_size) {
                      1.048576 / (end_time - start_time);
     }
     if (FLAGS_test_iterations == 0) {
-        std::cout << "Avg-Latency: " << g_latency_recorder.latency(10)
-                  << ", 90th-Latency: " << g_latency_recorder.latency_percentile(0.9)
-                  << ", 99th-Latency: " << g_latency_recorder.latency_percentile(0.99)
-                  << ", 99.9th-Latency: " << g_latency_recorder.latency_percentile(0.999)
-                  << ", Throughput: " << throughput << "MB/s"
+        if (FLAGS_record_latency) {
+            std::cout << "Avg-Latency: " << g_latency_recorder.latency(10)
+                      << ", 90th-Latency: " << g_latency_recorder.latency_percentile(0.9)
+                      << ", 99th-Latency: " << g_latency_recorder.latency_percentile(0.99)
+                      << ", 99.9th-Latency: " << g_latency_recorder.latency_percentile(0.999);
+        } else {
+            std::cout << "Avg-Latency: N/A"
+                      << ", 90th-Latency: N/A"
+                      << ", 99th-Latency: N/A"
+                      << ", 99.9th-Latency: N/A";
+        }
+        std::cout << ", Throughput: " << throughput << "MB/s"
                   << ", QPS: " << FormatQps(
                           g_total_cnt.load(butil::memory_order_relaxed),
                           end_time - start_time)
                   << ", Failed: " << g_failed_cnt.load(butil::memory_order_relaxed)
                   << ", Timeout: " << g_timeout_cnt.load(butil::memory_order_relaxed)
                   << ", PeakInflight: " << g_peak_inflight.load(butil::memory_order_relaxed)
-                  << ", Server CPU-utilization: " << g_server_cpu_recorder.latency(10) << "%"
-                  << ", Client CPU-utilization: " << g_client_cpu_recorder.latency(10) << "%"
+                  << ", Server CPU-utilization: ";
+        if (!IsRawJsonPayload() && IsMinimalResponseMode()) {
+            std::cout << "N/A";
+        } else {
+            std::cout << g_server_cpu_recorder.latency(10) << "%";
+        }
+        std::cout << ", Client CPU-utilization: "
+                  << g_client_cpu_recorder.latency(10) << "%"
                   << std::endl;
     } else {
         std::cout << "Throughput: " << throughput << "MB/s"
@@ -808,6 +845,15 @@ int main(int argc, char* argv[]) {
     if (!IsAttachmentPayload() && !IsRawJsonPayload()) {
         LOG(ERROR) << "Invalid payload_format=" << FLAGS_payload_format
                    << ", valid values are attachment and raw_json";
+        return -1;
+    }
+    if (!IsNormalResponseMode() && !IsMinimalResponseMode()) {
+        LOG(ERROR) << "Invalid response_mode=" << FLAGS_response_mode
+                   << ", valid values are normal and minimal";
+        return -1;
+    }
+    if (IsRawJsonPayload() && IsMinimalResponseMode()) {
+        LOG(ERROR) << "response_mode=minimal is only supported for protobuf attachment payloads";
         return -1;
     }
     if (IsRawJsonPayload() && !IsRawJsonProtocolAllowed()) {

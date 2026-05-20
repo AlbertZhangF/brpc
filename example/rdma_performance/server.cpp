@@ -265,6 +265,16 @@ public:
               google::protobuf::Closure* done) {
         brpc::ClosureGuard done_guard(done);
         brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
+        if (cntl->request_protocol() != brpc::PROTOCOL_HTTP &&
+            cntl->request_protocol() != brpc::PROTOCOL_H2 &&
+            request->minimal_response()) {
+            response->set_cpu_usage("");
+            if (request->echo_attachment()) {
+                cntl->response_attachment().append(cntl->request_attachment());
+            }
+            return;
+        }
+
         uint64_t last = g_last_time.load(butil::memory_order_relaxed);
         uint64_t now = butil::monotonic_time_us();
         std::string cpu_usage;

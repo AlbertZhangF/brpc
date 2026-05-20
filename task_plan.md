@@ -26,6 +26,7 @@ Implement the approved `use_rdma=false` benchmarking and observability changes f
 | 18. Bound shutdown time after test_seconds | completed | Added outstanding RPC cancellation and stop grace timeout so large-payload runs exit after the configured test duration. |
 | 19. Fix low-QPS output formatting | completed | Changed QPS printing from integer K-QPS truncation to floating-point formatting with raw QPS below 1000. |
 | 20. Minimize client hot-path overhead | completed | Removed per-RPC call-id tracking and CAS inflight permits from the default path, restoring da77da-style low-overhead sending while keeping lightweight fixes. |
+| 21. Add minimal response mode | completed | Added protobuf minimal response mode and optional latency recording to reduce benchmark-side response maintenance cost in large open-loop runs. |
 
 ## Decisions
 - Implement in the current clean feature branch instead of creating a new worktree.
@@ -51,3 +52,4 @@ Implement the approved `use_rdma=false` benchmarking and observability changes f
 - The steal_task experiment plan assumes remote machines can run perf, curl brpc vars, pidstat, ss, and the current rdma_performance binaries.
 - Worker pthread affinity only eliminates OS migration of `brpc_wkr` pthreads. It does not prevent bthread task stealing, socket ownership movement, shared bvar/resource-pool access, or cross-core cache-line transfers in shared queues and counters.
 - For large `pooled + open_loop` payloads, keep client-side pressure controls minimal: honor the configured global `max_inflight`, but do not add default per-connection throttling.
+- Minimal response mode is an explicit benchmark mode: it keeps brpc response completion semantics but disables business response parsing and server CPU reporting for throughput-focused tests.

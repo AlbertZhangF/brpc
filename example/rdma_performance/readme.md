@@ -103,12 +103,15 @@ taskset -c 112-127 ./example/rdma_performance/rdma_performance_server \
 | `--payload_format` | `attachment` | payload 模式：`attachment` 或 `raw_json`。 |
 | `--json_file` | 空 | raw JSON 模式下读取本地 `.json` 文件作为 HTTP body。为空时按 `attachment_size` 自动生成 `{"payload":"..."}`。 |
 | `--json_echo_check` | `false` | raw JSON + echo 模式下校验 response body 是否与 request body 完全一致。大 payload 吞吐测试建议关闭，因为会复制完整响应 body。 |
+| `--response_mode` | `normal` | protobuf attachment 模式下的响应处理模式：`normal` 或 `minimal`。`minimal` 会跳过业务 response protobuf 解析和 server CPU 采样，适合极限 QPS 测试。 |
+| `--record_latency` | `true` | 是否记录延迟分位数。关闭后减少高 QPS 下 latency recorder 的共享统计开销，延迟字段输出 `N/A`。 |
 
 Payload 模式说明：
 
 - `payload_format=attachment`：使用 protobuf stub 调用 `PerfTestService::Test`，payload 放在 brpc attachment 中。
 - `payload_format=raw_json`：不使用 protobuf stub；client 使用 `Channel::CallMethod(NULL, ...)` 发 HTTP/H2 POST，请求 body 直接放 JSON 字符串。
 - raw JSON 只支持 `--protocol=http` 或 `--protocol=h2`，不支持 `baidu_std`。
+- `response_mode=minimal` 只支持 `payload_format=attachment`。该模式仍走 brpc 正常 RPC response meta，但 client 不分配/解析 `PerfTestResponse`，server 也不采样 CPU 字符串。
 
 ### 3.4 负载模型参数
 
@@ -128,7 +131,7 @@ Payload 模式说明：
 
 - worker 持续尝试发送请求，不等待“完成一个再补一个”。
 - 通过全局 `max_inflight` 控制最大未完成请求数。
-- 当前实现使用 CAS permit，`PeakInflight` 不应超过配置的 `max_inflight`。
+- 当前实现使用低开销预检查加 inflight 计数，`PeakInflight` 可能略高于配置的 `max_inflight`。
 - 若 `expected_qps=0`，会尽力发压直到达到 `max_inflight`。
 
 ### 3.5 连接模型参数
@@ -161,7 +164,7 @@ client 结束时输出：
 | `Failed` | RPC 失败次数，包括连接失败、超时、echo check 失败等。 |
 | `Timeout` | 超时次数，包括 brpc RPC timeout 和系统 `ETIMEDOUT`。 |
 | `PeakInflight` | 运行期间观测到的最大未完成请求数。 |
-| `Server CPU-utilization` | server 通过响应字段/header 返回的 CPU 采样。 |
+| `Server CPU-utilization` | server 通过响应字段/header 返回的 CPU 采样。`response_mode=minimal` 下输出 `N/A`。 |
 | `Client CPU-utilization` | client 进程 CPU 采样。 |
 
 `Connection stats` 中每个 slot 输出：
@@ -219,7 +222,31 @@ client 结束时输出：
 
 适合验证 HTTP raw JSON body，不经过 protobuf JSON 自动转换。
 
-### 5.3 open_loop 大 payload 压测
+### 5.3 protobuf attachment + baidu_std + minimal response
+
+```bash
+taskset -c 80-159 ./example/rdma_performance/rdma_performance_client \
+  --use_rdma=false \
+  --protocol=baidu_std \
+  --connection_type=single \
+  --servers=127.0.0.1:8003 \
+  --thread_num=32 \
+  --queue_depth=32 \
+  --bthread_concurrency=160 \
+  --load_mode=open_loop \
+  --max_inflight=65545 \
+  --connection_num=32 \
+  --unique_connection_group=true \
+  --attachment_size=0 \
+  --echo_attachment=false \
+  --response_mode=minimal \
+  --record_latency=false \
+  --test_seconds=20
+```
+
+适合验证 open-loop 大量 outstanding RPC 时，benchmark 自身 response 解析和统计成本对 QPS 的影响。
+
+### 5.4 open_loop 大 payload 压测
 
 ```bash
 ./example/rdma_performance/rdma_performance_client \
@@ -243,7 +270,7 @@ client 结束时输出：
 
 适合验证 pooled 模式在大 payload 下的框架能力。`connect_timeout_ms=-1` 表示连接建立超时跟随 `rpc_timeout_ms=10000`。
 
-### 5.4 固定请求数
+### 5.5 固定请求数
 
 ```bash
 ./example/rdma_performance/rdma_performance_client \
@@ -306,5 +333,6 @@ for tid in $(ls /proc/$SERVER_PID/task); do taskset -pc $tid 2>/dev/null; done
 - `rpc_timeout_ms=2000` 对 1MB 以上 echo payload 可能偏小，建议从 `10000` 或 `30000` 开始对照。
 - `test_seconds` 到达后 client 会停止新发请求；若 `stop_grace_ms` 到期仍有 in-flight，请求会打印当前汇总并退出，避免等待很大的 `rpc_timeout_ms`。默认低开销模式不维护每 RPC 取消状态，只有显式 `--cancel_inflight_on_stop=true` 才会启用取消跟踪。
 - raw JSON 模式不经过 protobuf 序列化，但服务注册仍依赖 `test.proto`。
+- `response_mode=minimal` 会牺牲 server CPU 采样和 response protobuf 解析，只适合吞吐上限实验，不适合延迟/CPU 归因实验。
 - RPC 失败不会中断正式压测，会计入 `Failed/Timeout` 并继续运行；warmup RPC 失败仍会直接退出。
 - `json_echo_check=true` 会把完整 response body 转成字符串比较，大 payload 吞吐测试建议关闭。
