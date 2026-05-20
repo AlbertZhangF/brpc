@@ -147,3 +147,9 @@
 ## 2026-05-18 low-QPS formatting
 - Added QPS formatting that computes real QPS with floating point precision.
 - QPS values below 1000 now print as raw QPS instead of `0k`; values at or above 1000 still print in `k`.
+
+## 2026-05-20 client hot-path overhead minimization
+- Compared current client against `da77da061393c8c0afd22ae01d41482a824f5a2e`.
+- Removed default per-RPC call-id tracking, global mutex, and unordered set maintenance from `rdma_performance_client`.
+- Restored open-loop inflight accounting to the lower-overhead `fetch_add` style used by the earlier benchmark model.
+- Kept lightweight fixes: connection timeout option, failure counting without per-RPC logging, low-QPS formatting, and stop grace timeout.

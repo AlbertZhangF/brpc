@@ -63,8 +63,9 @@ DEFINE_int32(connect_timeout_ms, -1,
 DEFINE_int32(test_seconds, 20, "Test running time");
 DEFINE_int32(stop_grace_ms, 5000,
              "Max time to wait for in-flight RPCs after test_seconds is reached");
-DEFINE_bool(cancel_inflight_on_stop, true,
-            "Cancel outstanding asynchronous RPCs when the timed test stops");
+DEFINE_bool(cancel_inflight_on_stop, false,
+            "Cancel outstanding asynchronous RPCs when the timed test stops. "
+            "Disabled by default to avoid per-RPC tracking overhead");
 DEFINE_bool(log_rpc_error, false,
             "Print each failed RPC. Disabled by default to avoid log flooding under overload");
 DEFINE_int32(test_iterations, 0, "Total request budget, 0 means time-based run");
@@ -142,6 +143,7 @@ struct RespClosure {
     Worker* worker;
     ConnectionSlot* slot;
     brpc::CallId call_id;
+    bool track_call_id;
 };
 
 struct Worker {
@@ -304,28 +306,13 @@ static bool TryAcquireRequestPermit(uint64_t start_time_us) {
     if (g_stop || ShouldStopByTime(start_time_us)) {
         return false;
     }
+    if (!ConsumeRequestBudget()) {
+        return false;
+    }
     if (!AcquireQpsToken()) {
         return false;
     }
     return true;
-}
-
-static bool TryAcquireInflightPermit(int64_t limit) {
-    if (limit <= 0) {
-        const int64_t inflight =
-                g_inflight.fetch_add(1, butil::memory_order_relaxed) + 1;
-        UpdatePeakInflight(inflight);
-        return true;
-    }
-    int64_t old_value = g_inflight.load(butil::memory_order_relaxed);
-    while (old_value < limit) {
-        if (g_inflight.compare_exchange_weak(
-                    old_value, old_value + 1, butil::memory_order_relaxed)) {
-            UpdatePeakInflight(old_value + 1);
-            return true;
-        }
-    }
-    return false;
 }
 
 static void ReleaseInflightPermit() {
@@ -399,13 +386,6 @@ static void* GenerateToken(void* arg) {
     return NULL;
 }
 
-static int64_t GetEffectiveInflightLimit() {
-    if (!IsOpenLoop()) {
-        return 0;
-    }
-    return g_open_loop_inflight_limit.load(butil::memory_order_relaxed);
-}
-
 static bool SendRequest(Worker* worker);
 
 static bool ShouldStopWorkerAfterResponse(Worker* worker) {
@@ -432,7 +412,9 @@ static void HandleResponse(RespClosure* closure) {
     ConnectionSlot* slot = closure->slot;
     Worker* worker = closure->worker;
 
-    UnregisterCallId(closure->call_id);
+    if (closure->track_call_id) {
+        UnregisterCallId(closure->call_id);
+    }
     ReleaseInflightPermit();
 
     if (closure->cntl->Failed()) {
@@ -494,15 +476,6 @@ static bool SendRequest(Worker* worker) {
         worker->stop = true;
         return false;
     }
-    const int64_t inflight_limit = GetEffectiveInflightLimit();
-    if (!TryAcquireInflightPermit(inflight_limit)) {
-        return false;
-    }
-    if (!ConsumeRequestBudget()) {
-        ReleaseInflightPermit();
-        worker->stop = true;
-        return false;
-    }
 
     ConnectionSlot* slot = PickConnectionSlot();
     RespClosure* closure = new RespClosure;
@@ -510,8 +483,11 @@ static bool SendRequest(Worker* worker) {
     closure->slot = slot;
     closure->cntl = new brpc::Controller();
     closure->resp = IsRawJsonPayload() ? NULL : new test::PerfTestResponse();
-    closure->call_id = closure->cntl->call_id();
-    RegisterCallId(closure->call_id);
+    closure->track_call_id = FLAGS_cancel_inflight_on_stop;
+    if (closure->track_call_id) {
+        closure->call_id = closure->cntl->call_id();
+        RegisterCallId(closure->call_id);
+    }
     if (IsRawJsonPayload()) {
         closure->cntl->http_request().uri() = std::string(kRawJsonPath) +
                 "?echo_attachment=" + (worker->echo_attachment_flag ? "true" : "false");
@@ -521,6 +497,8 @@ static bool SendRequest(Worker* worker) {
     }
     google::protobuf::Closure* done = brpc::NewCallback(&HandleResponse, closure);
     slot->sent.fetch_add(1, butil::memory_order_relaxed);
+    int64_t inflight = g_inflight.fetch_add(1, butil::memory_order_relaxed) + 1;
+    UpdatePeakInflight(inflight);
     if (IsRawJsonPayload()) {
         slot->channel->CallMethod(NULL, closure->cntl, NULL, NULL, done);
     } else {

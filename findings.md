@@ -96,3 +96,8 @@
 - Error logging after timed stop should be suppressed because final `Failed/Timeout` counters are the useful signal; otherwise canceled or overcrowded callbacks can flood stderr after the measurement window.
 - Per-RPC failure logging is too noisy for overload experiments such as `EOVERCROWDED`; a flag-controlled log keeps final counters while avoiding stderr flooding.
 - The old QPS output used integer K-QPS arithmetic, so any successful throughput below 1000 QPS was displayed as `0k`. The formatter should calculate real QPS as floating point and only append `k` when QPS is at least 1000.
+
+## Client hot-path overhead minimization findings
+- Comparing against `da77da061393c8c0afd22ae01d41482a824f5a2e`, the largest new client hot-path cost was per-RPC `Controller::call_id()` plus global `mutex/unordered_set` insert/delete for cancellation tracking.
+- Strict CAS inflight permits also add contention in open-loop high-concurrency runs. Restoring the old `RunOpenLoopWorker` pre-check plus `SendRequest()` `fetch_add` keeps the configured inflight as an approximate cap with lower overhead.
+- `connect_timeout_ms`, QPS formatting, and per-RPC error-log suppression are not request hot-path costs or are negligible compared with RPC send/response handling, so they can remain.

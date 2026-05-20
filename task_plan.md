@@ -25,6 +25,7 @@ Implement the approved `use_rdma=false` benchmarking and observability changes f
 | 17. Add rdma_performance README | completed | Added `example/rdma_performance/readme.md` documenting server/client flags, models, examples, and observability commands. |
 | 18. Bound shutdown time after test_seconds | completed | Added outstanding RPC cancellation and stop grace timeout so large-payload runs exit after the configured test duration. |
 | 19. Fix low-QPS output formatting | completed | Changed QPS printing from integer K-QPS truncation to floating-point formatting with raw QPS below 1000. |
+| 20. Minimize client hot-path overhead | completed | Removed per-RPC call-id tracking and CAS inflight permits from the default path, restoring da77da-style low-overhead sending while keeping lightweight fixes. |
 
 ## Decisions
 - Implement in the current clean feature branch instead of creating a new worktree.

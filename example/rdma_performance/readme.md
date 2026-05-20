@@ -91,7 +91,7 @@ taskset -c 112-127 ./example/rdma_performance/rdma_performance_server \
 | `--rpc_timeout_ms` | `2000` | 单次 RPC 总超时。大 attachment + echo 时建议提高。 |
 | `--connect_timeout_ms` | `-1` | TCP 连接建立超时。`-1` 表示使用 `rpc_timeout_ms`。 |
 | `--stop_grace_ms` | `5000` | 到达 `test_seconds` 后等待 in-flight RPC 结束的最长时间，单位 ms。`-1` 表示一直等待。 |
-| `--cancel_inflight_on_stop` | `true` | 到达 `test_seconds` 后是否对未完成异步 RPC 调用 `brpc::StartCancel()`。 |
+| `--cancel_inflight_on_stop` | `false` | 到达 `test_seconds` 后是否取消未完成 RPC。默认关闭以避免每 RPC call-id 跟踪和全局锁开销；显式开启会增加 client 热路径开销。 |
 | `--log_rpc_error` | `false` | 是否逐条打印 RPC 失败日志。默认关闭，避免过载场景下刷屏；失败仍会计入最终 `Failed/Timeout`。 |
 
 ### 3.3 Payload 参数
@@ -137,7 +137,7 @@ Payload 模式说明：
 |---|---:|---|
 | `--connection_num` | `0` | 预创建的 `Channel/ConnectionSlot` 数量。`0` 表示使用 `thread_num`。 |
 | `--unique_connection_group` | `false` | 是否为每个 Channel 设置唯一 `connection_group`，用于避免同地址 `single` 连接被 SocketMap 复用。 |
-| `--report_connection_stats` | `true` | 结束时打印每个 connection slot 的 sent/completed/failed/timeouts。 |
+| `--report_connection_stats` | `false` | 结束时打印每个 connection slot 的 sent/completed/failed/timeouts。默认关闭以减少输出开销。 |
 
 连接语义说明：
 
@@ -304,7 +304,7 @@ for tid in $(ls /proc/$SERVER_PID/task); do taskset -pc $tid 2>/dev/null; done
 - `connection_num` 不是严格真实 TCP 连接数。真实连接数取决于 `connection_type`、`unique_connection_group`、server 地址数量和 brpc pooled 连接池行为。
 - `pooled` 模式下大 payload + 高 `max_inflight` 会显著增加 active socket、fd、端口、accept backlog 和网络队列压力，这是框架能力测试的一部分。
 - `rpc_timeout_ms=2000` 对 1MB 以上 echo payload 可能偏小，建议从 `10000` 或 `30000` 开始对照。
-- `test_seconds` 到达后 client 会停止新发请求，并默认取消未完成 RPC；若 `stop_grace_ms` 到期仍有 in-flight，请求会打印当前汇总并退出，避免等待很大的 `rpc_timeout_ms`。
+- `test_seconds` 到达后 client 会停止新发请求；若 `stop_grace_ms` 到期仍有 in-flight，请求会打印当前汇总并退出，避免等待很大的 `rpc_timeout_ms`。默认低开销模式不维护每 RPC 取消状态，只有显式 `--cancel_inflight_on_stop=true` 才会启用取消跟踪。
 - raw JSON 模式不经过 protobuf 序列化，但服务注册仍依赖 `test.proto`。
 - RPC 失败不会中断正式压测，会计入 `Failed/Timeout` 并继续运行；warmup RPC 失败仍会直接退出。
 - `json_echo_check=true` 会把完整 response body 转成字符串比较，大 payload 吞吐测试建议关闭。
