@@ -107,3 +107,8 @@
 - The benchmark can avoid its own response payload cost by passing `NULL` as the client response message. `ProcessRpcResponse()` then skips protobuf response deserialization while still completing the controller and callback.
 - Server `minimal_response=true` avoids the periodic `process_cpu_usage` bvar lookup and only sets `PerfTestResponse.cpu_usage` to an empty initialized value to satisfy proto2 required-field semantics.
 - `record_latency=false` avoids writing the shared latency recorder on every completed RPC, which is useful for open-loop QPS ceiling tests but removes latency percentile observability.
+
+## Latency window findings
+- `bvar::LatencyRecorder::latency(10)` returns the average latency in the recent 10 seconds, not the whole benchmark run.
+- `LatencyRecorder::latency_percentile()` uses the recorder's constructor window, so a global recorder constructed before flag parsing cannot adapt its percentile window to per-run `test_seconds`.
+- Creating the client latency recorder inside each `Test()` with `window_size=test_seconds` aligns average and percentile outputs with the configured benchmark duration while keeping `record_latency=false` as the no-recorder low-overhead path.

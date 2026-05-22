@@ -104,7 +104,7 @@ taskset -c 112-127 ./example/rdma_performance/rdma_performance_server \
 | `--json_file` | 空 | raw JSON 模式下读取本地 `.json` 文件作为 HTTP body。为空时按 `attachment_size` 自动生成 `{"payload":"..."}`。 |
 | `--json_echo_check` | `false` | raw JSON + echo 模式下校验 response body 是否与 request body 完全一致。大 payload 吞吐测试建议关闭，因为会复制完整响应 body。 |
 | `--response_mode` | `normal` | protobuf attachment 模式下的响应处理模式：`normal` 或 `minimal`。`minimal` 会跳过业务 response protobuf 解析和 server CPU 采样，适合极限 QPS 测试。 |
-| `--record_latency` | `true` | 是否记录延迟分位数。关闭后减少高 QPS 下 latency recorder 的共享统计开销，延迟字段输出 `N/A`。 |
+| `--record_latency` | `true` | 是否记录延迟分位数。关闭后减少高 QPS 下 latency recorder 的共享统计开销，延迟字段输出 `N/A`。开启时延迟窗口按本次 `test_seconds` 创建；未设置时间窗口时回退到 10 秒。 |
 
 Payload 模式说明：
 
@@ -156,8 +156,8 @@ client 结束时输出：
 
 | 指标 | 含义 |
 |---|---|
-| `Avg-Latency` | client 观察到的平均延迟。 |
-| `90th/99th/99.9th-Latency` | 延迟分位数。 |
+| `Avg-Latency` | client 观察到的平均延迟。`record_latency=true` 时按本次 `test_seconds` 窗口统计。 |
+| `90th/99th/99.9th-Latency` | 延迟分位数。`record_latency=true` 时按本次 `test_seconds` 窗口统计。 |
 | `Throughput` | 按请求 payload 字节估算的吞吐，单位 MB/s。 |
 | `QPS` | 成功完成请求数除以运行时间。`>=1000` 时以 `k` 为单位显示，小于 `1000` 时显示真实 QPS 数值。 |
 | `Completed` | `test_iterations>0` 时输出，表示成功完成请求数。 |

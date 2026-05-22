@@ -86,7 +86,7 @@ DEFINE_string(response_mode, "normal",
 DEFINE_bool(record_latency, true,
             "Record latency percentiles. Disable for max-throughput tests to reduce client-side stats overhead");
 
-bvar::LatencyRecorder g_latency_recorder("client");
+std::unique_ptr<bvar::LatencyRecorder> g_latency_recorder;
 bvar::LatencyRecorder g_server_cpu_recorder("server_cpu");
 bvar::LatencyRecorder g_client_cpu_recorder("client_cpu");
 butil::atomic<uint64_t> g_last_time(0);
@@ -206,6 +206,10 @@ static bool IsMinimalResponseMode() {
 
 static bool IsNormalResponseMode() {
     return FLAGS_response_mode == kResponseModeNormal;
+}
+
+static int LatencyWindowSeconds() {
+    return FLAGS_test_seconds > 0 ? FLAGS_test_seconds : 10;
 }
 
 static std::string LowerString(const std::string& value) {
@@ -448,7 +452,9 @@ static void HandleResponse(RespClosure* closure) {
 
     slot->completed.fetch_add(1, butil::memory_order_relaxed);
     if (FLAGS_record_latency) {
-        g_latency_recorder << closure->cntl->latency_us();
+        if (g_latency_recorder) {
+            *g_latency_recorder << closure->cntl->latency_us();
+        }
     }
     if (!IsRawJsonPayload() && closure->resp != NULL &&
         !closure->resp->cpu_usage().empty()) {
@@ -713,6 +719,12 @@ static void Test(int thread_num, int attachment_size) {
     g_rr_index.store(0, butil::memory_order_relaxed);
     g_open_loop_inflight_limit.store(
             open_loop_inflight_limit, butil::memory_order_relaxed);
+    if (FLAGS_record_latency) {
+        g_latency_recorder.reset(
+                new bvar::LatencyRecorder("client", LatencyWindowSeconds()));
+    } else {
+        g_latency_recorder.reset();
+    }
 
     if (InitConnectionSlots(actual_connection_num, FLAGS_echo_attachment) < 0) {
         DestroyConnectionSlots();
@@ -783,11 +795,11 @@ static void Test(int thread_num, int attachment_size) {
                      1.048576 / (end_time - start_time);
     }
     if (FLAGS_test_iterations == 0) {
-        if (FLAGS_record_latency) {
-            std::cout << "Avg-Latency: " << g_latency_recorder.latency(10)
-                      << ", 90th-Latency: " << g_latency_recorder.latency_percentile(0.9)
-                      << ", 99th-Latency: " << g_latency_recorder.latency_percentile(0.99)
-                      << ", 99.9th-Latency: " << g_latency_recorder.latency_percentile(0.999);
+        if (FLAGS_record_latency && g_latency_recorder) {
+            std::cout << "Avg-Latency: " << g_latency_recorder->latency()
+                      << ", 90th-Latency: " << g_latency_recorder->latency_percentile(0.9)
+                      << ", 99th-Latency: " << g_latency_recorder->latency_percentile(0.99)
+                      << ", 99.9th-Latency: " << g_latency_recorder->latency_percentile(0.999);
         } else {
             std::cout << "Avg-Latency: N/A"
                       << ", 90th-Latency: N/A"

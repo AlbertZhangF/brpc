@@ -27,6 +27,7 @@ Implement the approved `use_rdma=false` benchmarking and observability changes f
 | 19. Fix low-QPS output formatting | completed | Changed QPS printing from integer K-QPS truncation to floating-point formatting with raw QPS below 1000. |
 | 20. Minimize client hot-path overhead | completed | Removed per-RPC call-id tracking and CAS inflight permits from the default path, restoring da77da-style low-overhead sending while keeping lightweight fixes. |
 | 21. Add minimal response mode | completed | Added protobuf minimal response mode and optional latency recording to reduce benchmark-side response maintenance cost in large open-loop runs. |
+| 22. Align latency output window with test_seconds | completed | Changed client latency recorder creation to use the current test duration instead of fixed 10-second average output. |
 
 ## Decisions
 - Implement in the current clean feature branch instead of creating a new worktree.

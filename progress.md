@@ -162,3 +162,8 @@
 - Updated `example/rdma_performance/readme.md` with the new flags, minimal-response command, and output caveats.
 - `git diff --check` passed.
 - Local CMake configure/build did not complete because this machine lacks the configured protobuf include path `/home/zfz/ins/protobuf/include/google/protobuf/stubs/common.h` and CMake could not find the brpc output path.
+
+## 2026-05-21 latency window by test_seconds
+- Confirmed `LatencyRecorder::latency(10)` means recent 10-second average.
+- Changed the client latency recorder to be created inside each `Test()` with a window equal to `test_seconds`, so average and percentile latency output follow the current benchmark duration.
+- Kept `record_latency=false` as a no-recorder path for extreme QPS tests.
