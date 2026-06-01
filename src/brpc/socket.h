@@ -57,6 +57,9 @@ namespace rdma {
 class RdmaEndpoint;
 class RdmaConnect;
 }
+namespace iouring {
+class IouringEndpoint;
+}
 
 class Socket;
 class AuthContext;
@@ -317,6 +320,7 @@ friend class policy::RtmpContext;
 friend class schan::ChannelBalancer;
 friend class rdma::RdmaEndpoint;
 friend class rdma::RdmaConnect;
+friend class iouring::IouringEndpoint;
 friend class HealthCheckTask;
 friend class OnAppHealthCheckDone;
 friend class HealthCheckManager;
@@ -327,6 +331,7 @@ friend void DereferenceSocket(Socket*);
 friend class Transport;
 friend class TcpTransport;
 friend class RdmaTransport;
+friend class IouringTransport;
 friend class TransportFactory;
     class SharedPart;
     struct WriteRequest;

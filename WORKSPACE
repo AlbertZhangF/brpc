@@ -279,6 +279,15 @@ http_archive(
     urls = ["https://archive.apache.org/dist/thrift/0.15.0/thrift-0.15.0.tar.gz"],
 )
 
+# io_uring support via local liburing source tree.
+# Enable with: --define=BRPC_WITH_IOURING=true
+# Requires liburing checked out at /docker/root/projects/liburing
+new_local_repository(
+    name = "com_github_axboe_liburing",
+    path = "/docker/root/projects/liburing",
+    build_file = "//bazel/third_party/liburing:liburing.BUILD",
+)
+
 #
 # Perl Dependencies
 #
