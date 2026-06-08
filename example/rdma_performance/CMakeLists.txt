@@ -19,6 +19,8 @@ cmake_minimum_required(VERSION 2.8.10)
 project(rdma_performance C CXX)
 
 option(LINK_SO "Whether examples are linked dynamically" OFF)
+option(WITH_RDMA "Build rdma_performance with RDMA transport support" ON)
+option(WITH_IOURING "Build rdma_performance with io_uring transport support" OFF)
 
 execute_process(
     COMMAND bash -c "find ${PROJECT_SOURCE_DIR}/../.. -type d -regex \".*output/include$\" | head -n1 | xargs dirname | tr -d '\n'"
@@ -27,6 +29,7 @@ execute_process(
 
 set(CMAKE_PREFIX_PATH ${OUTPUT_PATH})
 
+include_directories(/home/zfz/ins/protobuf/include)
 include(FindThreads)
 include(FindProtobuf)
 protobuf_generate_cpp(PROTO_SRC PROTO_HEADER test.proto)
@@ -66,18 +69,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     endif()
 endif()
 
-set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=1")
+set(WITH_RDMA_VAL "0")
+if(WITH_RDMA)
+    set(WITH_RDMA_VAL "1")
+endif()
+set(WITH_IOURING_VAL "0")
+if(WITH_IOURING)
+    set(WITH_IOURING_VAL "1")
+endif()
+
+set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_RDMA=${WITH_RDMA_VAL} -DBRPC_WITH_IOURING=${WITH_IOURING_VAL}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O2 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
 
 if(CMAKE_VERSION VERSION_LESS "3.1.3")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
     endif()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
     endif()
 else()
-    set(CMAKE_CXX_STANDARD 11)
+    set(CMAKE_CXX_STANDARD 17)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
@@ -97,10 +109,44 @@ endif()
 find_package(OpenSSL)
 include_directories(${OPENSSL_INCLUDE_DIR})
 
-find_path(RDMA_INCLUDE_PATH NAMES infiniband/verbs.h)
-find_library(RDMA_LIB NAMES ibverbs)
-if ((NOT RDMA_INCLUDE_PATH) OR (NOT RDMA_LIB))
-    message(FATAL_ERROR "Fail to find ibverbs")
+if(WITH_RDMA)
+    find_path(RDMA_INCLUDE_PATH NAMES infiniband/verbs.h)
+    find_library(RDMA_LIB NAMES ibverbs)
+    if ((NOT RDMA_INCLUDE_PATH) OR (NOT RDMA_LIB))
+        message(FATAL_ERROR "Fail to find ibverbs")
+    endif()
+    include_directories(${RDMA_INCLUDE_PATH})
+endif()
+
+if(WITH_IOURING)
+    find_path(IOURING_INCLUDE_PATH NAMES liburing.h
+              PATHS
+                  /usr/include
+                  /usr/local/include
+                  /docker/root/projects/liburing/src/include
+              NO_DEFAULT_PATH)
+    if(NOT IOURING_INCLUDE_PATH)
+        find_path(IOURING_INCLUDE_PATH NAMES liburing.h)
+    endif()
+
+    find_library(IOURING_LIB NAMES uring liburing.a
+                 PATHS
+                     /usr/lib
+                     /usr/lib64
+                     /usr/local/lib
+                     /usr/local/lib64
+                     /docker/root/projects/liburing/src
+                 NO_DEFAULT_PATH)
+    if(NOT IOURING_LIB)
+        find_library(IOURING_LIB NAMES uring)
+    endif()
+
+    if((NOT IOURING_INCLUDE_PATH) OR (NOT IOURING_LIB))
+        message(FATAL_ERROR "Fail to find liburing. "
+                            "Please install liburing-dev / liburing-devel, or "
+                            "build from source and set CMAKE_PREFIX_PATH accordingly.")
+    endif()
+    include_directories(${IOURING_INCLUDE_PATH})
 endif()
 
 set(DYNAMIC_LIB
@@ -113,6 +159,14 @@ set(DYNAMIC_LIB
     ${THRIFT_LIB}
     dl
     )
+
+if(WITH_RDMA)
+    set(DYNAMIC_LIB ${DYNAMIC_LIB} ${RDMA_LIB})
+endif()
+
+if(WITH_IOURING)
+    set(DYNAMIC_LIB ${DYNAMIC_LIB} ${IOURING_LIB})
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(DYNAMIC_LIB ${DYNAMIC_LIB}
@@ -137,3 +191,17 @@ add_executable(server server.cpp ${PROTO_SRC} ${PROTO_HEADER})
 
 target_link_libraries(client ${BRPC_LIB} ${DYNAMIC_LIB})
 target_link_libraries(server ${BRPC_LIB} ${DYNAMIC_LIB})
+
+file(GLOB ABSL_LIBS "/home/zfz/ins/protobuf/lib64/libabsl_*.so")
+
+# 2. 定义强制链接标志
+# -Wl,--no-as-needed 会强制链接器加载后续的所有库，不论是否看起来“没被直接使用”
+set(FORCE_LINK_FLAGS "-Wl,--no-as-needed")
+
+# 3. 更新链接逻辑
+if(TARGET client)
+    target_link_libraries(client PRIVATE ${FORCE_LINK_FLAGS} ${ABSL_LIBS})
+endif()
+if(TARGET server)
+    target_link_libraries(server PRIVATE ${FORCE_LINK_FLAGS} ${ABSL_LIBS})
+endif()

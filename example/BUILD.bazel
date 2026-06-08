@@ -47,13 +47,6 @@ brpc_proto_library(
 )
 
 brpc_proto_library(
-    name = "cc_iouring_performance_proto",
-    srcs = ["iouring_performance/test.proto"],
-    include = "iouring_performance",
-    proto_deps = [],
-)
-
-brpc_proto_library(
     name = "cc_rdma_performance_proto",
     srcs = ["rdma_performance/test.proto"],
     include = "rdma_performance",
@@ -98,42 +91,9 @@ cc_binary(
     includes = [
         "rdma_performance",
     ],
-    copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
+    copts = COPTS,
     deps = [
         ":cc_rdma_performance_proto",
-        "//:brpc",
-    ],
-)
-
-cc_binary(
-    name = "rdma_performance_client",
-    srcs = [
-        "rdma_performance/client.cpp",
-    ],
-    includes = [
-        "rdma_performance",
-    ],
-    copts = COPTS + ["-DBRPC_WITH_RDMA=1"],
-    deps = [
-        ":cc_rdma_performance_proto",
-        "//:brpc",
-    ],
-)
-
-cc_binary(
-    name = "iouring_performance_server",
-    srcs = [
-        "iouring_performance/server.cpp",
-    ],
-    includes = [
-        "iouring_performance",
-    ],
-    copts = COPTS + select({
-        "//bazel/config:brpc_with_iouring": ["-DBRPC_WITH_IOURING=1"],
-        "//conditions:default": [""],
-    }),
-    deps = [
-        ":cc_iouring_performance_proto",
         "//:brpc",
     ] + select({
         "//bazel/config:brpc_with_iouring": [
@@ -144,19 +104,16 @@ cc_binary(
 )
 
 cc_binary(
-    name = "iouring_performance_client",
+    name = "rdma_performance_client",
     srcs = [
-        "iouring_performance/client.cpp",
+        "rdma_performance/client.cpp",
     ],
     includes = [
-        "iouring_performance",
+        "rdma_performance",
     ],
-    copts = COPTS + select({
-        "//bazel/config:brpc_with_iouring": ["-DBRPC_WITH_IOURING=1"],
-        "//conditions:default": [""],
-    }),
+    copts = COPTS,
     deps = [
-        ":cc_iouring_performance_proto",
+        ":cc_rdma_performance_proto",
         "//:brpc",
     ] + select({
         "//bazel/config:brpc_with_iouring": [

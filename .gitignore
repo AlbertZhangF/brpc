@@ -53,3 +53,5 @@ bazel-bin
 bazel-out
 bazel-testlogs
 bazel-brpc
+.gitignore
+bug_info.md
