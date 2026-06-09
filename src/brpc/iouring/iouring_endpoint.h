@@ -23,7 +23,9 @@
 #include <liburing.h>
 #include <pthread.h>
 #include <sys/uio.h>
+#include <deque>
 #include <functional>
+#include <unordered_map>
 #include <vector>
 #include <unordered_set>
 #include "brpc/iouring/iouring_helper.h"   // IouringPollerHandle, kBrpcCqeTag, IouringPollingMode
@@ -73,6 +75,7 @@ struct IouringReqContext {
     size_t          write_offset{0};  // bytes already completed
     size_t          write_total{0};   // total bytes in write_buf
     size_t          submitted_len{0}; // bytes covered by the current SQE
+    size_t          write_units{1};   // original write requests merged here
 };
 
 // ---------------------------------------------------------------------------
@@ -198,6 +201,9 @@ private:
         bthread_t tid{INVALID_BTHREAD};
         butil::MPSCQueue<SidOp, butil::ObjectPoolAllocator<SidOp>> op_queue;
         butil::MPSCQueue<IouringReqContext*> write_queue;
+        std::unordered_map<SocketId, std::deque<IouringReqContext*>>
+            pending_writes;
+        std::unordered_set<SocketId> active_writes;
 
         // Called on the Poller thread with the handle bound to this Poller.
         std::function<void(IouringPollerHandle)> callback;
@@ -219,6 +225,7 @@ private:
     static void PollerDrainOpQueue(Poller* poller,
                                    std::unordered_set<SocketId>& tracked_sids);
     static bool PollerDrainWriteQueue(Poller* poller);
+    static bool SubmitNextWrite(Poller* poller, SocketId sid);
     static int SubmitWriteContext(Poller* poller, IouringEndpoint* ep,
                                   IouringReqContext* ctx);
     static int BuildWriteIovecs(IouringReqContext* ctx);

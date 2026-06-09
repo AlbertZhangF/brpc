@@ -63,7 +63,12 @@ DEFINE_bool(iouring_poller_yield, false,
 DEFINE_int32(iouring_max_cqe_poll_once, 32,
              "Maximum CQEs reaped per io_uring_peek_batch_cqe() call.");
 
-static const int32_t MAX_INFLIGHT_WRITES = 64;
+DEFINE_int32(iouring_max_inflight_writes, 1024,
+             "Maximum queued/in-flight io_uring writes per socket.");
+
+DEFINE_int32(iouring_write_batch_size, 32,
+             "Maximum queued io_uring writes to coalesce per socket before "
+             "submitting one ordered write SQE.");
 
 // ---------------------------------------------------------------------------
 // Constructor / Destructor
@@ -325,7 +330,8 @@ ssize_t IouringEndpoint::CutFromIOBufList(butil::IOBuf** from, size_t ndata) {
 }
 
 bool IouringEndpoint::IsWritable() const {
-    return _inflight_writes.load(butil::memory_order_relaxed) < MAX_INFLIGHT_WRITES;
+    return _inflight_writes.load(butil::memory_order_relaxed) <
+           FLAGS_iouring_max_inflight_writes;
 }
 
 int IouringEndpoint::BuildWriteIovecs(IouringReqContext* ctx) {
@@ -415,31 +421,89 @@ bool IouringEndpoint::PollerDrainWriteQueue(Poller* poller) {
     IouringReqContext* ctx = nullptr;
     while (poller->write_queue.Dequeue(ctx)) {
         progress = true;
-        SocketUniquePtr s;
-        IouringEndpoint* ep = nullptr;
-        if (Socket::Address(ctx->socket_id, &s) == 0) {
-            IouringTransport* transport =
-                static_cast<IouringTransport*>(s->_transport.get());
-            ep = transport ? transport->_iouring_ep : nullptr;
-        }
-        if (!s || !ep) {
-            delete ctx;
-            continue;
-        }
-        if (SubmitWriteContext(poller, ep, ctx) < 0) {
-            if (errno == ENOBUFS) {
-                poller->write_queue.Enqueue(ctx);
-                break;
-            }
-            const int saved_errno = errno;
-            s->SetFailed(saved_errno, "io_uring write submit failed: %s",
-                         berror(saved_errno));
-            ep->_inflight_writes.fetch_sub(1, butil::memory_order_relaxed);
-            ep->_socket->WakeAsEpollOut();
-            delete ctx;
+        poller->pending_writes[ctx->socket_id].push_back(ctx);
+    }
+
+    std::vector<SocketId> pending_sids;
+    pending_sids.reserve(poller->pending_writes.size());
+    for (const auto& entry : poller->pending_writes) {
+        if (!entry.second.empty() && !poller->active_writes.count(entry.first)) {
+            pending_sids.push_back(entry.first);
         }
     }
+    for (SocketId sid : pending_sids) {
+        SubmitNextWrite(poller, sid);
+    }
     return progress;
+}
+
+bool IouringEndpoint::SubmitNextWrite(Poller* poller, SocketId sid) {
+    auto pending_it = poller->pending_writes.find(sid);
+    if (pending_it == poller->pending_writes.end() ||
+        pending_it->second.empty() ||
+        poller->active_writes.count(sid)) {
+        return false;
+    }
+
+    IouringReqContext* ctx = pending_it->second.front();
+    pending_it->second.pop_front();
+
+    const int batch_flag = FLAGS_iouring_write_batch_size;
+    const size_t batch_size =
+        batch_flag > 0 ? static_cast<size_t>(batch_flag) : 1;
+    while (ctx->write_units < batch_size && !pending_it->second.empty()) {
+        IouringReqContext* next = pending_it->second.front();
+        if (!next || next->op != ctx->op || next->fd != ctx->fd ||
+            next->socket_id != ctx->socket_id) {
+            break;
+        }
+        if (ctx->write_units + next->write_units > batch_size) {
+            break;
+        }
+        pending_it->second.pop_front();
+        ctx->write_buf.append(next->write_buf);
+        ctx->write_total += next->write_total;
+        ctx->write_units += next->write_units;
+        delete next;
+    }
+
+    SocketUniquePtr s;
+    IouringEndpoint* ep = nullptr;
+    if (Socket::Address(ctx->socket_id, &s) == 0) {
+        IouringTransport* transport =
+            static_cast<IouringTransport*>(s->_transport.get());
+        ep = transport ? transport->_iouring_ep : nullptr;
+    }
+    if (!s || !ep) {
+        if (pending_it->second.empty()) {
+            poller->pending_writes.erase(pending_it);
+        }
+        delete ctx;
+        return false;
+    }
+    if (SubmitWriteContext(poller, ep, ctx) < 0) {
+        if (errno == ENOBUFS) {
+            poller->pending_writes[ctx->socket_id].push_front(ctx);
+            return false;
+        }
+        const int saved_errno = errno;
+        s->SetFailed(saved_errno, "io_uring write submit failed: %s",
+                     berror(saved_errno));
+        ep->_inflight_writes.fetch_sub(
+            static_cast<int32_t>(ctx->write_units),
+            butil::memory_order_relaxed);
+        ep->_socket->WakeAsEpollOut();
+        if (pending_it->second.empty()) {
+            poller->pending_writes.erase(pending_it);
+        }
+        delete ctx;
+        return false;
+    }
+    if (pending_it->second.empty()) {
+        poller->pending_writes.erase(pending_it);
+    }
+    poller->active_writes.insert(ctx->socket_id);
+    return true;
 }
 
 int IouringEndpoint::EnqueueWrite(IouringReqContext* ctx) {
@@ -516,9 +580,11 @@ void IouringEndpoint::PollCq(Poller* poller) {
                 if (ctx->op == IOURING_OP_READ) { free(ctx->bounce); }
                 if (ctx->op == IOURING_OP_WRITE ||
                     ctx->op == IOURING_OP_WRITE_FIXED) {
+                    poller->active_writes.erase(ctx->socket_id);
                     if (ep) {
                         ep->_inflight_writes.fetch_sub(
-                            1, butil::memory_order_relaxed);
+                            static_cast<int32_t>(ctx->write_units),
+                            butil::memory_order_relaxed);
                         ep->_socket->WakeAsEpollOut();
                     }
                 }
@@ -591,13 +657,17 @@ void IouringEndpoint::PollCq(Poller* poller) {
             }
 
             if (!ep) {
+                poller->active_writes.erase(ctx->socket_id);
                 delete ctx;
                 continue;
             }
 
             if (res == 0) {
+                poller->active_writes.erase(ctx->socket_id);
                 s->SetFailed(EPIPE, "io_uring write returned 0");
-                ep->_inflight_writes.fetch_sub(1, butil::memory_order_relaxed);
+                ep->_inflight_writes.fetch_sub(
+                    static_cast<int32_t>(ctx->write_units),
+                    butil::memory_order_relaxed);
                 ep->_socket->WakeAsEpollOut();
                 delete ctx;
                 continue;
@@ -607,14 +677,17 @@ void IouringEndpoint::PollCq(Poller* poller) {
             if (ctx->write_offset < ctx->write_total) {
                 if (SubmitWriteContext(poller, ep, ctx) < 0) {
                     if (errno == ENOBUFS) {
-                        poller->write_queue.Enqueue(ctx);
+                        poller->active_writes.erase(ctx->socket_id);
+                        poller->pending_writes[ctx->socket_id].push_front(ctx);
                     } else {
                         const int saved_errno = errno;
+                        poller->active_writes.erase(ctx->socket_id);
                         s->SetFailed(saved_errno,
                                      "io_uring write resubmit failed: %s",
                                      berror(saved_errno));
                         ep->_inflight_writes.fetch_sub(
-                            1, butil::memory_order_relaxed);
+                            static_cast<int32_t>(ctx->write_units),
+                            butil::memory_order_relaxed);
                         ep->_socket->WakeAsEpollOut();
                         delete ctx;
                     }
@@ -622,9 +695,14 @@ void IouringEndpoint::PollCq(Poller* poller) {
                 continue;
             }
 
-            ep->_inflight_writes.fetch_sub(1, butil::memory_order_relaxed);
+            const SocketId completed_sid = ctx->socket_id;
+            poller->active_writes.erase(completed_sid);
+            ep->_inflight_writes.fetch_sub(
+                static_cast<int32_t>(ctx->write_units),
+                butil::memory_order_relaxed);
             ep->_socket->WakeAsEpollOut();
             delete ctx;
+            SubmitNextWrite(poller, completed_sid);
         }
         if (!consumed_brpc_cqe) { return; }
     }
@@ -724,6 +802,13 @@ void IouringEndpoint::PollerDrainOpQueue(
             }
         } else {
             // REMOVE: release the read slot (if any) back to the pool.
+            auto pending_it = poller->pending_writes.find(op.sid);
+            if (pending_it != poller->pending_writes.end()) {
+                for (IouringReqContext* ctx : pending_it->second) {
+                    delete ctx;
+                }
+                poller->pending_writes.erase(pending_it);
+            }
             if (IsFixedBuffersEnabled() && op.read_slot.buf != nullptr) {
                 if (poller->slot_pool.initialized()) {
                     poller->slot_pool.Release(op.read_slot);
@@ -955,6 +1040,18 @@ int IouringEndpoint::PollingModeInitialize(
         if (poller->release_fn) {
             poller->release_fn(IouringPollerHandle(args->tag, args->index));
         }
+
+        IouringReqContext* pending_ctx = nullptr;
+        while (poller->write_queue.Dequeue(pending_ctx)) {
+            delete pending_ctx;
+        }
+        for (auto& entry : poller->pending_writes) {
+            for (IouringReqContext* ctx : entry.second) {
+                delete ctx;
+            }
+        }
+        poller->pending_writes.clear();
+        poller->active_writes.clear();
 
         if (poller->ring_initialized) {
             // Unregister this ring from the global mem-pool before destroying

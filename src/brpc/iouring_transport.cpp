@@ -126,18 +126,17 @@ std::shared_ptr<AppConnect> IouringTransport::Connect() {
 // -----------------------------------------------------------------------
 
 int IouringTransport::CutFromIOBuf(butil::IOBuf* buf) {
-    // If io_uring is available and has capacity, use it.
-    if (_iouring_ep && iouring::IsIouringAvailable() &&
-        _iouring_ep->IsWritable()) {
+    if (_iouring_ep && iouring::IsIouringAvailable()) {
+        if (!_iouring_ep->IsWritable()) {
+            errno = EAGAIN;
+            return -1;
+        }
         butil::IOBuf* bufs[1] = {buf};
         ssize_t nw = _iouring_ep->CutFromIOBufList(bufs, 1);
         if (nw >= 0) {
             return 0;
         }
-        if (errno != EAGAIN) {
-            return -1;
-        }
-        // Fall through to TCP fallback on EAGAIN
+        return -1;
     }
     // Fallback: synchronous write via the fd
     return buf->cut_into_file_descriptor(_socket->fd());
@@ -148,13 +147,12 @@ int IouringTransport::CutFromIOBuf(butil::IOBuf* buf) {
 // -----------------------------------------------------------------------
 
 ssize_t IouringTransport::CutFromIOBufList(butil::IOBuf** buf, size_t ndata) {
-    if (_iouring_ep && iouring::IsIouringAvailable() &&
-        _iouring_ep->IsWritable()) {
-        ssize_t nw = _iouring_ep->CutFromIOBufList(buf, ndata);
-        if (nw >= 0 || errno != EAGAIN) {
-            return nw;
+    if (_iouring_ep && iouring::IsIouringAvailable()) {
+        if (!_iouring_ep->IsWritable()) {
+            errno = EAGAIN;
+            return -1;
         }
-        // EAGAIN: fall through to synchronous path
+        return _iouring_ep->CutFromIOBufList(buf, ndata);
     }
     return butil::IOBuf::cut_multiple_into_file_descriptor(
         _socket->fd(), buf, ndata);
