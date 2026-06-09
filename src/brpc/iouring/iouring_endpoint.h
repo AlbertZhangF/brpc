@@ -22,6 +22,7 @@
 
 #include <liburing.h>
 #include <pthread.h>
+#include <sys/uio.h>
 #include <functional>
 #include <vector>
 #include <unordered_set>
@@ -67,6 +68,11 @@ struct IouringReqContext {
     int             fd;         // file descriptor
     SocketId        socket_id;  // owning socket id
     void*           bounce{nullptr};  // unregistered-mode bounce buf (may be null)
+    butil::IOBuf    write_buf;        // keeps async write data alive
+    std::vector<struct iovec> iov;    // keeps WRITEV iovec array alive
+    size_t          write_offset{0};  // bytes already completed
+    size_t          write_total{0};   // total bytes in write_buf
+    size_t          submitted_len{0}; // bytes covered by the current SQE
 };
 
 // ---------------------------------------------------------------------------
@@ -88,10 +94,9 @@ struct IouringReqContext {
 //     Issues IORING_OP_READ_FIXED into _read_slot.buf / _read_slot.buf_index.
 //
 //   PollCq()  (READ_FIXED branch)
-//     res bytes are already in the slot's pinned memory.
-//     IOBuf::append_user_data() wraps them zero-copy; the destructor returns
-//     the block to IouringMemPool (thread-safe) when the last ref drops.
-//     A fresh slot is acquired immediately and the next READ_FIXED is queued.
+//     res bytes are already in the slot's pinned memory.  The data is copied
+//     into the Socket read buffer, then the slot is immediately returned to
+//     the Poller-owned slot_pool and a fresh READ_FIXED is queued.
 //
 //   CutFromIOBufList()
 //     Every IOBuf block comes from the registered slab; each block gets its
@@ -108,17 +113,17 @@ struct IouringReqContext {
 //
 // Thread safety
 // -------------
-// All SQ operations (SubmitRead, CutFromIOBufList, SubmitOneSqe) run on the
-// Poller thread.  IouringReadSlotPool is only accessed from the Poller thread
-// so it needs no locking.  AllocateResources / DeallocateResources enqueue
-// a SidOp message; slot_pool operations are performed when the Poller dequeues
-// the message.
+// SubmitRead / SubmitOneSqe run on the Poller thread.  CutFromIOBufList only
+// builds a write context and enqueues it to the Poller; the Poller thread owns
+// all io_uring SQ access.  IouringReadSlotPool is only accessed from the Poller
+// thread so it needs no locking.
 // ---------------------------------------------------------------------------
 
 class BAIDU_CACHELINE_ALIGNMENT IouringEndpoint : public SocketUser {
 friend class ::brpc::Socket;
 friend class ::brpc::IouringTransport;
 friend class IouringPollerHandle;   // needs _poller_groups and Poller
+    struct Poller;
 public:
     explicit IouringEndpoint(Socket* s);
     ~IouringEndpoint() override;
@@ -138,8 +143,6 @@ public:
 
     bool IsWritable() const;
 
-    static void PollCq(Socket* m);
-
     static int  PollingModeInitialize(
                     bthread_tag_t tag,
                     std::function<void(IouringPollerHandle)> callback,
@@ -152,11 +155,14 @@ public:
                    butil::StringPiece connector = "\n") const;
 
 private:
-    int  AllocateResources();
+    int  AllocateResources(int fd);
     void DeallocateResources();
 
-    void PollerAddSid();
+    void PollerAddSid(int fd);
     void PollerRemoveSid(const IouringReadSlot& slot = IouringReadSlot{});
+    bool BindPoller();
+    int EnqueueWrite(IouringReqContext* ctx);
+    static void PollCq(Poller* poller);
 
     // -----------------------------------------------------------------------
     // Per-endpoint state
@@ -175,20 +181,23 @@ private:
     struct SidOp {
         enum OpType { ADD, REMOVE };
         SocketId       sid;
+        int            fd;
         OpType         type;
         // Only meaningful for REMOVE + fixed-buffer mode: the read slot that
         // was held by the endpoint.  Returned to slot_pool on the Poller
         // thread so that slot_pool never needs a lock.
         IouringReadSlot read_slot;
 
-        SidOp() : sid(0), type(ADD), read_slot() {}
-        SidOp(SocketId s, OpType t, IouringReadSlot rs = IouringReadSlot{})
-            : sid(s), type(t), read_slot(rs) {}
+        SidOp() : sid(0), fd(-1), type(ADD), read_slot() {}
+        SidOp(SocketId s, int f, OpType t,
+              IouringReadSlot rs = IouringReadSlot{})
+            : sid(s), fd(f), type(t), read_slot(rs) {}
     };
 
     struct BAIDU_CACHELINE_ALIGNMENT Poller {
         bthread_t tid{INVALID_BTHREAD};
         butil::MPSCQueue<SidOp, butil::ObjectPoolAllocator<SidOp>> op_queue;
+        butil::MPSCQueue<IouringReqContext*> write_queue;
 
         // Called on the Poller thread with the handle bound to this Poller.
         std::function<void(IouringPollerHandle)> callback;
@@ -209,6 +218,10 @@ private:
     // Must be called exclusively on the Poller thread.
     static void PollerDrainOpQueue(Poller* poller,
                                    std::unordered_set<SocketId>& tracked_sids);
+    static bool PollerDrainWriteQueue(Poller* poller);
+    static int SubmitWriteContext(Poller* poller, IouringEndpoint* ep,
+                                  IouringReqContext* ctx);
+    static int BuildWriteIovecs(IouringReqContext* ctx);
 
     struct BAIDU_CACHELINE_ALIGNMENT PollerGroup {
         // Exactly one Poller per bthread_tag (SQ single-producer constraint).
@@ -231,6 +244,10 @@ private:
     //   errno=ENOBUFS  → SQ full
     //   errno=ENODEV   → ring not initialised
     int SubmitOneSqe(std::function<void(struct io_uring_sqe*)> prepare_fn);
+
+    bthread_tag_t _poller_tag{0};
+    int           _poller_index{0};
+    bool          _poller_bound{false};
 };
 
 }  // namespace iouring

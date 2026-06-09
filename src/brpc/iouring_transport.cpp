@@ -56,8 +56,8 @@ void IouringTransport::Init(Socket* socket, const SocketOptions& options) {
     // Register this socket with the Poller.  AllocateResources enqueues an
     // ADD SidOp; the Poller thread picks it up, acquires a read slot (when
     // --iouring_register_buffers=true) and issues the first SubmitRead.
-    if (iouring::IsIouringAvailable()) {
-        if (_iouring_ep->AllocateResources() < 0) {
+    if (iouring::IsIouringAvailable() && options.fd >= 0) {
+        if (_iouring_ep->AllocateResources(options.fd) < 0) {
             LOG(WARNING) << "Fail to allocate io_uring resources for "
                          << socket->description() << ", falling back to TCP";
             delete _iouring_ep;
@@ -79,6 +79,9 @@ void IouringTransport::Init(Socket* socket, const SocketOptions& options) {
             // never added to epoll for read events.
             _on_edge_trigger = nullptr;
         }
+    } else {
+        delete _iouring_ep;
+        _iouring_ep = nullptr;
     }
 
     // Create the TCP fallback transport (always available).

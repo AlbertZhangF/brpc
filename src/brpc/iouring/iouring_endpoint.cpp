@@ -20,8 +20,11 @@
 #include <errno.h>
 #include <liburing.h>
 #include <sys/uio.h>
+#include <algorithm>
+#include <limits.h>
 #include <unordered_set>
 #include <string.h>
+#include <utility>
 
 #include <gflags/gflags.h>
 #include "butil/atomicops.h"
@@ -34,6 +37,7 @@
 #include "brpc/input_messenger.h"
 #include "brpc/socket.h"
 #include "brpc/reloadable_flags.h"
+#include "brpc/iouring_transport.h"
 #include "brpc/iouring/iouring_block_pool.h"
 #include "brpc/iouring/iouring_helper.h"
 #include "brpc/iouring/iouring_endpoint.h"
@@ -85,7 +89,15 @@ void IouringEndpoint::Reset() {
 // Resource management
 // ---------------------------------------------------------------------------
 
-int IouringEndpoint::AllocateResources() {
+int IouringEndpoint::AllocateResources(int fd) {
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (!BindPoller()) {
+        errno = ENODEV;
+        return -1;
+    }
     // Register this socket with the Poller via the MPSC op_queue.
     // The Poller thread will dequeue the ADD message on its next iteration
     // and issue the first SubmitRead there – on the Poller thread, without
@@ -93,7 +105,7 @@ int IouringEndpoint::AllocateResources() {
     //
     // Registered-buffer mode: acquire a fixed read slot on the Poller thread
     // when processing the ADD message (see main loop).  Nothing to do here.
-    PollerAddSid();
+    PollerAddSid(fd);
     return 0;
 }
 
@@ -110,12 +122,18 @@ void IouringEndpoint::DeallocateResources() {
 // ---------------------------------------------------------------------------
 
 IouringEndpoint::Poller* IouringEndpoint::GetPoller() const {
-    bthread_tag_t tag = bthread_self_tag();
-    if (tag < 0 || tag >= static_cast<int>(_poller_groups.size())) { tag = 0; }
-    auto& pollers = _poller_groups[tag].pollers;
-    const size_t index = butil::fmix32(_socket->id()) % pollers.size();
-    if (!pollers[index].ring_initialized) { return nullptr; }
-    return &pollers[index];
+    if (!_poller_bound) { return nullptr; }
+    if (_poller_tag < 0 ||
+        _poller_tag >= static_cast<int>(_poller_groups.size())) {
+        return nullptr;
+    }
+    auto& pollers = _poller_groups[_poller_tag].pollers;
+    if (_poller_index < 0 ||
+        _poller_index >= static_cast<int>(pollers.size())) {
+        return nullptr;
+    }
+    if (!pollers[_poller_index].ring_initialized) { return nullptr; }
+    return &pollers[_poller_index];
 }
 
 // ---------------------------------------------------------------------------
@@ -270,132 +288,177 @@ ssize_t IouringEndpoint::CutFromIOBufList(butil::IOBuf** from, size_t ndata) {
 
     if (!IsWritable()) { errno = EAGAIN; return -1; }
 
-    const int fd = _socket->fd();
-
-    // ------------------------------------------------------------------
-    // WRITE_FIXED path (--iouring_register_buffers=true)
-    // ------------------------------------------------------------------
-    // Every IOBuf block comes from IouringMemPool (a pre-registered slab).
-    // GetBufIndex() must always succeed; if it returns -1 a block somehow
-    // escaped the pool – LOG(ERROR) and fail rather than silently degrading.
-    //
-    // One IORING_OP_WRITE_FIXED SQE is submitted per block so the kernel can
-    // DMA directly from pinned pages with no per-op get_user_pages overhead.
-    // Called on the Poller thread; no locking needed.
-    // ------------------------------------------------------------------
-    if (IsFixedBuffersEnabled()) {
-        Poller* poller = GetPoller();
-        if (!poller) { errno = ENODEV; return -1; }
-        IouringMemPool& mp = IouringMemPool::Instance();
-        struct io_uring* ring = &poller->ring;
-
-        ssize_t total_bytes = 0;
-        int sqes_queued = 0;
-
-        for (size_t i = 0; i < ndata; ++i) {
-            if (!from[i] || from[i]->empty()) { continue; }
-            butil::IOBuf& buf = *from[i];
-            while (!buf.empty()) {
-                const void* seg_ptr = buf.fetch1();
-                size_t      seg_len = buf.backing_block(0).size();
-                if (seg_len == 0) { break; }
-
-                int buf_idx = mp.GetBufIndex(ring, seg_ptr);
-                if (buf_idx < 0) {
-                    // Every block must be registered when
-                    // --iouring_register_buffers=true.  A -1 here means a
-                    // block escaped the pool – this is a programming error.
-                    LOG(ERROR) << "io_uring: unregistered IOBuf block ptr="
-                               << seg_ptr << " fd=" << fd
-                               << "; submission aborted.";
-                    errno = EINVAL;
-                    break;
-                }
-
-                struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-                if (!sqe) { errno = ENOBUFS; break; }
-
-                io_uring_prep_write_fixed(sqe, fd,
-                                          const_cast<void*>(seg_ptr),
-                                          static_cast<unsigned>(seg_len),
-                                          0, buf_idx);
-                IouringReqContext* ctx = new IouringReqContext{};
-                ctx->op = IOURING_OP_WRITE_FIXED;
-                ctx->fd = fd;
-                ctx->socket_id = _socket->id();
-                sqe->user_data = reinterpret_cast<uint64_t>(ctx) | kBrpcCqeTag;
-                total_bytes += static_cast<ssize_t>(seg_len);
-                ++sqes_queued;
-                buf.pop_front(seg_len);
-            }
-        }
-
-        if (sqes_queued > 0) {
-            int ret = io_uring_submit(ring);
-            if (ret < 0) {
-                errno = -ret;
-                return total_bytes > 0 ? total_bytes : -1;
-            }
-            _inflight_writes.fetch_add(sqes_queued, butil::memory_order_relaxed);
-        }
-        return total_bytes > 0 ? total_bytes : (sqes_queued == 0 ? 0 : -1);
-    }
-
-    // ------------------------------------------------------------------
-    // Plain WRITEV path (--iouring_register_buffers=false)
-    // ------------------------------------------------------------------
-    // Collect all iovec entries from the IOBuf list and submit a single
-    // IORING_OP_WRITEV.  Cap at IOURING_IOV_MAX to stay within SQ limits.
-    // ------------------------------------------------------------------
-    static const size_t IOURING_IOV_MAX = 256;
-    std::vector<struct iovec> iov;
-    ssize_t total_bytes = 0;
-
-    for (size_t i = 0; i < ndata; ++i) {
-        if (!from[i] || from[i]->empty()) { continue; }
-        butil::IOBuf& buf = *from[i];
-        while (!buf.empty() && iov.size() < IOURING_IOV_MAX) {
-            const void* seg_ptr = buf.fetch1();
-            size_t      seg_len = buf.backing_block(0).size();
-            if (seg_len == 0) { break; }
-            iov.push_back({const_cast<void*>(seg_ptr), seg_len});
-            total_bytes += static_cast<ssize_t>(seg_len);
-            buf.pop_front(seg_len);
-        }
-        if (iov.size() >= IOURING_IOV_MAX) { break; }
-    }
-
-    if (iov.empty()) { return 0; }
-
     IouringReqContext* ctx = new IouringReqContext{};
-    ctx->op        = IOURING_OP_WRITE;
-    ctx->fd        = fd;
+    ctx->op = IsFixedBuffersEnabled() ? IOURING_OP_WRITE_FIXED
+                                      : IOURING_OP_WRITE;
+    ctx->fd = _socket->fd();
     ctx->socket_id = _socket->id();
 
-    int ret = SubmitOneSqe([&](struct io_uring_sqe* sqe) {
-        io_uring_prep_writev(sqe, fd, iov.data(),
-                             static_cast<unsigned>(iov.size()), 0);
-        sqe->user_data = reinterpret_cast<uint64_t>(ctx) | kBrpcCqeTag;
-    });
-    if (ret < 0) { delete ctx; return -1; }
-    _inflight_writes.fetch_add(1, butil::memory_order_relaxed);
-    return total_bytes;
+    size_t total_bytes = 0;
+    for (size_t i = 0; i < ndata; ++i) {
+        if (!from[i] || from[i]->empty()) { continue; }
+        const size_t n = from[i]->size();
+        from[i]->append_to(&ctx->write_buf, n);
+        total_bytes += n;
+    }
+    if (total_bytes == 0) {
+        delete ctx;
+        return 0;
+    }
+    const size_t return_bytes = total_bytes;
+    ctx->write_total = return_bytes;
+
+    if (EnqueueWrite(ctx) < 0) {
+        const int saved_errno = errno;
+        delete ctx;
+        errno = saved_errno;
+        return -1;
+    }
+
+    for (size_t i = 0; i < ndata && total_bytes > 0; ++i) {
+        if (!from[i] || from[i]->empty()) { continue; }
+        const size_t n = std::min(from[i]->size(), total_bytes);
+        from[i]->pop_front(n);
+        total_bytes -= n;
+    }
+    return static_cast<ssize_t>(return_bytes);
 }
 
 bool IouringEndpoint::IsWritable() const {
     return _inflight_writes.load(butil::memory_order_relaxed) < MAX_INFLIGHT_WRITES;
 }
 
+int IouringEndpoint::BuildWriteIovecs(IouringReqContext* ctx) {
+    static const size_t IOURING_IOV_MAX = 256;
+    ctx->iov.clear();
+    ctx->submitted_len = 0;
+
+    size_t skip = ctx->write_offset;
+    const size_t nblocks = ctx->write_buf.backing_block_num();
+    for (size_t i = 0; i < nblocks && ctx->iov.size() < IOURING_IOV_MAX; ++i) {
+        butil::StringPiece blk = ctx->write_buf.backing_block(i);
+        if (skip >= blk.size()) {
+            skip -= blk.size();
+            continue;
+        }
+        const char* data = blk.data() + skip;
+        size_t len = blk.size() - skip;
+        if (len > static_cast<size_t>(UINT_MAX)) {
+            len = static_cast<size_t>(UINT_MAX);
+        }
+        ctx->iov.push_back({const_cast<char*>(data), len});
+        ctx->submitted_len += len;
+        skip = 0;
+    }
+    return ctx->iov.empty() ? -1 : 0;
+}
+
+int IouringEndpoint::SubmitWriteContext(Poller* poller,
+                                        IouringEndpoint* ep,
+                                        IouringReqContext* ctx) {
+    if (!poller || !poller->ring_initialized || !ep || !ctx) {
+        errno = ENODEV;
+        return -1;
+    }
+
+    if (ctx->op == IOURING_OP_WRITE_FIXED) {
+        size_t skip = ctx->write_offset;
+        const size_t nblocks = ctx->write_buf.backing_block_num();
+        for (size_t i = 0; i < nblocks; ++i) {
+            butil::StringPiece blk = ctx->write_buf.backing_block(i);
+            if (skip >= blk.size()) {
+                skip -= blk.size();
+                continue;
+            }
+            void* data = const_cast<char*>(blk.data() + skip);
+            size_t len = blk.size() - skip;
+            if (len > static_cast<size_t>(UINT_MAX)) {
+                len = static_cast<size_t>(UINT_MAX);
+            }
+            const int buf_idx =
+                IouringMemPool::Instance().GetBufIndex(&poller->ring, data);
+            if (buf_idx < 0) {
+                errno = EINVAL;
+                return -1;
+            }
+            struct io_uring_sqe* sqe = io_uring_get_sqe(&poller->ring);
+            if (!sqe) { errno = ENOBUFS; return -1; }
+            ctx->submitted_len = len;
+            io_uring_prep_write_fixed(sqe, ctx->fd, data,
+                                      static_cast<unsigned>(len),
+                                      0, buf_idx);
+            sqe->user_data = reinterpret_cast<uint64_t>(ctx) | kBrpcCqeTag;
+            const int ret = io_uring_submit(&poller->ring);
+            if (ret < 0) { errno = -ret; return -1; }
+            return 0;
+        }
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (BuildWriteIovecs(ctx) < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct io_uring_sqe* sqe = io_uring_get_sqe(&poller->ring);
+    if (!sqe) { errno = ENOBUFS; return -1; }
+    io_uring_prep_writev(sqe, ctx->fd, ctx->iov.data(),
+                         static_cast<unsigned>(ctx->iov.size()), 0);
+    sqe->user_data = reinterpret_cast<uint64_t>(ctx) | kBrpcCqeTag;
+    const int ret = io_uring_submit(&poller->ring);
+    if (ret < 0) { errno = -ret; return -1; }
+    return 0;
+}
+
+bool IouringEndpoint::PollerDrainWriteQueue(Poller* poller) {
+    bool progress = false;
+    IouringReqContext* ctx = nullptr;
+    while (poller->write_queue.Dequeue(ctx)) {
+        progress = true;
+        SocketUniquePtr s;
+        IouringEndpoint* ep = nullptr;
+        if (Socket::Address(ctx->socket_id, &s) == 0) {
+            IouringTransport* transport =
+                static_cast<IouringTransport*>(s->_transport.get());
+            ep = transport ? transport->_iouring_ep : nullptr;
+        }
+        if (!s || !ep) {
+            delete ctx;
+            continue;
+        }
+        if (SubmitWriteContext(poller, ep, ctx) < 0) {
+            if (errno == ENOBUFS) {
+                poller->write_queue.Enqueue(ctx);
+                break;
+            }
+            const int saved_errno = errno;
+            s->SetFailed(saved_errno, "io_uring write submit failed: %s",
+                         berror(saved_errno));
+            ep->_inflight_writes.fetch_sub(1, butil::memory_order_relaxed);
+            ep->_socket->WakeAsEpollOut();
+            delete ctx;
+        }
+    }
+    return progress;
+}
+
+int IouringEndpoint::EnqueueWrite(IouringReqContext* ctx) {
+    Poller* poller = GetPoller();
+    if (!poller) { errno = ENODEV; return -1; }
+    _inflight_writes.fetch_add(1, butil::memory_order_relaxed);
+    poller->write_queue.Enqueue(ctx);
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // PollCq – CQE completion handler
 //
-// READ_FIXED path (--iouring_register_buffers=true, zero-copy)
-// -------------------------------------------------------------
+// READ_FIXED path (--iouring_register_buffers=true)
+// -------------------------------------------------
 // The kernel has written |res| bytes directly into ep->_read_slot.buf (a
-// pre-registered, pinned page).  IOBuf::append_user_data() wraps those bytes
-// without copying; the destructor returns the block to IouringMemPool
-// (thread-safe) when the last IOBuf reference is dropped.
-// A fresh slot is acquired immediately and the next READ_FIXED queued.
+// pre-registered, pinned page).  PollCq copies those bytes into the Socket
+// read buffer, returns the slot to the Poller-owned slot_pool immediately,
+// and queues the next READ_FIXED.
 //
 // READ path (--iouring_register_buffers=false)
 // --------------------------------------------
@@ -403,196 +466,167 @@ bool IouringEndpoint::IsWritable() const {
 // IOBuf takes ownership (free() destructor) when the data is wrapped.
 // ---------------------------------------------------------------------------
 
-void IouringEndpoint::PollCq(Socket* m) {
-    IouringEndpoint* ep = static_cast<IouringEndpoint*>(m->user());
-    if (!ep) { return; }
-
-    SocketUniquePtr s;
-    if (Socket::Address(ep->_socket->id(), &s) < 0) { return; }
-
-    // CQ-side operations need only the ring pointer; no lock required here
-    // because io_uring_peek_batch_cqe / io_uring_cqe_seen operate on the CQ
-    // which is only touched by the Poller thread.
-    Poller* poller = ep->GetPoller();
-    if (!poller) { return; }
+void IouringEndpoint::PollCq(Poller* poller) {
+    if (!poller || !poller->ring_initialized) { return; }
     struct io_uring* ring = &poller->ring;
-
     struct io_uring_cqe* cqes[FLAGS_iouring_max_cqe_poll_once];
-    InputMessageClosure last_msg;
-    int progress = Socket::PROGRESS_INIT;
 
     while (true) {
         const int cnt = io_uring_peek_batch_cqe(
             ring, cqes, static_cast<unsigned>(FLAGS_iouring_max_cqe_poll_once));
+        if (cnt <= 0) { return; }
 
-        if (cnt <= 0) {
-            if (s->Failed()) { return; }
-            if (!m->MoreReadEvents(&progress)) { break; }
-            continue;
-        }
-
-        ssize_t bytes_read = 0;
-
+        bool consumed_brpc_cqe = false;
         for (int i = 0; i < cnt; ++i) {
             struct io_uring_cqe* cqe = cqes[i];
             const uint64_t udata = cqe->user_data;
 
-            // Only process CQEs that bRPC submitted (bit 63 == 1).
-            // All other CQEs are user-submitted; leave them in the ring so the
-            // user callback (called right after PollCq returns) can
-            // drain and handle them.  Users need no special tagging – bit 63
-            // is never set in a canonical user-space pointer or small integer.
             if (!(udata & kBrpcCqeTag)) {
-                continue;  // do NOT call io_uring_cqe_seen()
-            }
-
-            // Strip the tag bit to recover the original IouringReqContext*.
-            // udata == kBrpcCqeTag (NOP wake-up SQE) → ctx will be nullptr.
-            IouringReqContext* ctx =
-                reinterpret_cast<IouringReqContext*>(
-                    static_cast<uintptr_t>(udata & ~kBrpcCqeTag));
-
-            if (!ctx) {
-                io_uring_cqe_seen(ring, cqe);
                 continue;
             }
 
+            IouringReqContext* ctx =
+                reinterpret_cast<IouringReqContext*>(
+                    static_cast<uintptr_t>(udata & ~kBrpcCqeTag));
             const int res = cqe->res;
             io_uring_cqe_seen(ring, cqe);
+            consumed_brpc_cqe = true;
+            if (!ctx) { continue; }
 
-            // ---------------------------------------------------------------
-            // Error handling
-            // ---------------------------------------------------------------
+            SocketUniquePtr s;
+            IouringEndpoint* ep = nullptr;
+            if (Socket::Address(ctx->socket_id, &s) == 0) {
+                IouringTransport* transport =
+                    static_cast<IouringTransport*>(s->_transport.get());
+                ep = transport ? transport->_iouring_ep : nullptr;
+            }
+
             if (res < 0) {
-                if (res == -ECANCELED) {
-                    // Op was cancelled.
-                    // READ_FIXED: the slot is still owned by the endpoint
-                    // (_read_slot); DeallocateResources will release it.
-                    // IOURING_OP_READ: free the bounce buffer.
+                if (res != -ECANCELED) {
+                    const int saved_errno = -res;
+                    LOG(WARNING) << "io_uring CQE error fd=" << ctx->fd
+                                 << " socket_id=" << ctx->socket_id
+                                 << " op=" << (int)ctx->op
+                                 << ": " << berror(saved_errno);
+                    if (s) {
+                        s->SetFailed(saved_errno, "io_uring op error: %s",
+                                     berror(saved_errno));
+                    }
+                }
+                if (ctx->op == IOURING_OP_READ) { free(ctx->bounce); }
+                if (ctx->op == IOURING_OP_WRITE ||
+                    ctx->op == IOURING_OP_WRITE_FIXED) {
+                    if (ep) {
+                        ep->_inflight_writes.fetch_sub(
+                            1, butil::memory_order_relaxed);
+                        ep->_socket->WakeAsEpollOut();
+                    }
+                }
+                delete ctx;
+                continue;
+            }
+
+            if (ctx->op == IOURING_OP_READ || ctx->op == IOURING_OP_READ_FIXED) {
+                if (!s || !ep) {
                     if (ctx->op == IOURING_OP_READ) { free(ctx->bounce); }
                     delete ctx;
                     continue;
                 }
 
-                const int saved_errno = -res;
-                LOG(WARNING) << "io_uring CQE error fd=" << ctx->fd
-                             << " socket_id=" << ctx->socket_id
-                             << " op=" << (int)ctx->op
-                             << ": " << berror(saved_errno);
-                SocketUniquePtr cs;
-                if (Socket::Address(ctx->socket_id, &cs) == 0) {
-                    cs->SetFailed(saved_errno, "io_uring op error: %s",
-                                  berror(saved_errno));
-                }
-                if (ctx->op == IOURING_OP_READ) { free(ctx->bounce); }
-                delete ctx;
-                continue;
-            }
-
-            // ---------------------------------------------------------------
-            // Dispatch by operation type
-            // ---------------------------------------------------------------
-            if (ctx->op == IOURING_OP_READ || ctx->op == IOURING_OP_READ_FIXED) {
                 if (res == 0) {
-                    // EOF
-                    SocketUniquePtr cs;
-                    if (Socket::Address(ctx->socket_id, &cs) == 0) {
-                        cs->SetEOF();
-                    }
+                    s->SetEOF();
                     if (ctx->op == IOURING_OP_READ) { free(ctx->bounce); }
                     delete ctx;
                     continue;
                 }
 
                 if (ctx->op == IOURING_OP_READ_FIXED) {
-                    // ---------------------------------------------------------
-                    // Registered mode – zero-copy.
-                    //
-                    // The kernel has written |res| bytes into the slot's pinned
-                    // buffer.  We hand it to IOBuf zero-copy; the destructor
-                    // returns it to IouringMemPool (thread-safe) when the last
-                    // IOBuf reference is dropped.
-                    //
-                    // Slot rotation:
-                    //   1. Steal the slot from the endpoint (ep->_read_slot={}).
-                    //   2. Acquire a fresh slot for the next READ_FIXED.
-                    //   3. Submit the next read.
-                    // ---------------------------------------------------------
                     IouringReadSlot consumed_slot = ep->_read_slot;
                     ep->_read_slot = {};
-
-                    // Already on the Poller thread – no lock needed.
-                    // Acquire the next slot before handing off consumed_slot so
-                    // that back-to-back arrivals never stall waiting for a slot.
-                    {
-                        Poller* p = ep->GetPoller();
-                        if (p && p->slot_pool.initialized()) {
-                            p->slot_pool.Acquire(&ep->_read_slot);
+                    if (consumed_slot.buf) {
+                        s->_read_buf.append(consumed_slot.buf,
+                                            static_cast<size_t>(res));
+                        if (poller->slot_pool.initialized()) {
+                            poller->slot_pool.Release(consumed_slot);
+                            if (!poller->slot_pool.Acquire(&ep->_read_slot)) {
+                                s->SetFailed(ENOMEM,
+                                    "io_uring slot pool exhausted");
+                            }
+                        } else {
+                            s->SetFailed(ENODEV,
+                                         "io_uring READ_FIXED slot pool "
+                                         "is not initialized");
                         }
+                    } else {
+                        s->SetFailed(EINVAL,
+                                     "io_uring READ_FIXED completed without "
+                                     "a read slot");
                     }
-
-                    // Zero-copy: wrap slot memory – IouringMemPool is
-                    // thread-safe so the destructor can run on any thread.
-                    struct SlotDeleter {
-                        static void destroy(void* ptr) {
-                            IouringMemPool::Instance().Deallocate(ptr);
-                        }
-                    };
-                    butil::IOBuf tmp;
-                    tmp.append_user_data(consumed_slot.buf,
-                                         static_cast<size_t>(res),
-                                         SlotDeleter::destroy);
-                    m->_read_buf.append(std::move(tmp));
-
-                    ep->SubmitRead(ctx->fd);
                 } else {
-                    // ---------------------------------------------------------
-                    // Unregistered mode – bounce buffer.
-                    //
-                    // The bounce buffer was malloc'd in SubmitRead and stored in
-                    // ctx->bounce.  Transfer ownership to IOBuf (free() is
-                    // called when IOBuf discards the block).
-                    // ---------------------------------------------------------
                     butil::IOBuf tmp;
                     tmp.append_user_data(ctx->bounce,
                                          static_cast<size_t>(res),
                                          free);
-                    ctx->bounce = nullptr;  // ownership transferred
-                    m->_read_buf.append(std::move(tmp));
-
-                    ep->SubmitRead(ctx->fd);
+                    ctx->bounce = nullptr;
+                    s->_read_buf.append(std::move(tmp));
                 }
 
-                bytes_read += res;
-
-            } else {
-                // WRITE / WRITE_FIXED completion
-                IouringEndpoint* dep = ep;
-                if (ctx->socket_id != ep->_socket->id()) {
-                    SocketUniquePtr cs;
-                    if (Socket::Address(ctx->socket_id, &cs) == 0) {
-                        dep = static_cast<IouringEndpoint*>(cs->user());
+                if (!s->Failed()) {
+                    ep->SubmitRead(ctx->fd);
+                    const int64_t received_us = butil::cpuwide_time_us();
+                    const int64_t base_realtime =
+                        butil::gettimeofday_us() - received_us;
+                    InputMessageClosure last_msg;
+                    InputMessenger* messenger =
+                        static_cast<InputMessenger*>(s->user());
+                    if (messenger && messenger->ProcessNewMessage(
+                                s.get(), res, false, received_us,
+                                base_realtime, last_msg) < 0) {
+                        delete ctx;
+                        continue;
                     }
                 }
-                if (dep) {
-                    dep->_inflight_writes.fetch_sub(1, butil::memory_order_relaxed);
-                    dep->_socket->WakeAsEpollOut();
+                delete ctx;
+                continue;
+            }
+
+            if (!ep) {
+                delete ctx;
+                continue;
+            }
+
+            if (res == 0) {
+                s->SetFailed(EPIPE, "io_uring write returned 0");
+                ep->_inflight_writes.fetch_sub(1, butil::memory_order_relaxed);
+                ep->_socket->WakeAsEpollOut();
+                delete ctx;
+                continue;
+            }
+
+            ctx->write_offset += static_cast<size_t>(res);
+            if (ctx->write_offset < ctx->write_total) {
+                if (SubmitWriteContext(poller, ep, ctx) < 0) {
+                    if (errno == ENOBUFS) {
+                        poller->write_queue.Enqueue(ctx);
+                    } else {
+                        const int saved_errno = errno;
+                        s->SetFailed(saved_errno,
+                                     "io_uring write resubmit failed: %s",
+                                     berror(saved_errno));
+                        ep->_inflight_writes.fetch_sub(
+                            1, butil::memory_order_relaxed);
+                        ep->_socket->WakeAsEpollOut();
+                        delete ctx;
+                    }
                 }
+                continue;
             }
 
+            ep->_inflight_writes.fetch_sub(1, butil::memory_order_relaxed);
+            ep->_socket->WakeAsEpollOut();
             delete ctx;
-        }  // for each cqe
-
-        if (bytes_read > 0) {
-            const int64_t received_us   = butil::cpuwide_time_us();
-            const int64_t base_realtime = butil::gettimeofday_us() - received_us;
-            InputMessenger* messenger = static_cast<InputMessenger*>(s->user());
-            if (messenger && messenger->ProcessNewMessage(
-                        s.get(), bytes_read, false,
-                        received_us, base_realtime, last_msg) < 0) {
-                return;
-            }
         }
+        if (!consumed_brpc_cqe) { return; }
     }
 }
 
@@ -649,8 +683,19 @@ void IouringEndpoint::PollerDrainOpQueue(
             tracked_sids.emplace(op.sid);
             SocketUniquePtr s_add;
             if (Socket::Address(op.sid, &s_add) == 0) {
+                if (s_add->fd() != op.fd) {
+                    if (!s_add->Failed()) {
+                        poller->op_queue.Enqueue(op);
+                        bthread_yield();
+                    } else {
+                        tracked_sids.erase(op.sid);
+                    }
+                    continue;
+                }
+                IouringTransport* transport =
+                    static_cast<IouringTransport*>(s_add->_transport.get());
                 IouringEndpoint* ep =
-                    static_cast<IouringEndpoint*>(s_add->user());
+                    transport ? transport->_iouring_ep : nullptr;
                 if (ep) {
                     // Acquire a fixed read slot for this connection.
                     if (IsFixedBuffersEnabled()) {
@@ -667,13 +712,15 @@ void IouringEndpoint::PollerDrainOpQueue(
                         }
                     }
                     // Issue the first SubmitRead on the Poller thread.
-                    if (ep->SubmitRead(s_add->fd()) < 0) {
+                    if (ep->SubmitRead(op.fd) < 0) {
                         LOG(WARNING)
                             << "IouringEndpoint: first SubmitRead "
                                "failed for socket "
                             << op.sid << ": " << berror();
                     }
                 }
+            } else {
+                tracked_sids.erase(op.sid);
             }
         } else {
             // REMOVE: release the read slot (if any) back to the pool.
@@ -832,6 +879,7 @@ int IouringEndpoint::PollingModeInitialize(
             // All slot_pool operations happen here, on the Poller thread,
             // so no locking is ever needed for slot_pool.
             PollerDrainOpQueue(poller, tracked_sids);
+            PollerDrainWriteQueue(poller);
 
             // b) Reap CQEs.
             bool got_cqe = false;  // used by SQPOLL/IOPOLL/HYBRID branches
@@ -843,10 +891,7 @@ int IouringEndpoint::PollingModeInitialize(
                 // there is no I/O traffic.
                 struct io_uring_cqe* cqe = nullptr;
                 struct __kernel_timespec ts{0, 1000000};  // 1 ms
-                int r = io_uring_wait_cqe_timeout(&poller->ring, &cqe, &ts);
-                if (r == 0 && cqe) {
-                    io_uring_cqe_seen(&poller->ring, cqe);
-                }
+                io_uring_wait_cqe_timeout(&poller->ring, &cqe, &ts);
 
             } else if (mode == IouringPollingMode::IOPOLL) {
                 // IOPOLL (IORING_SETUP_IOPOLL): the kernel never generates
@@ -890,12 +935,8 @@ int IouringEndpoint::PollingModeInitialize(
                 }
             }
 
-            // c) Dispatch to each socket.
-            for (SocketId sid : tracked_sids) {
-                SocketUniquePtr s;
-                if (Socket::Address(sid, &s) < 0) { continue; }
-                IouringEndpoint::PollCq(s.get());
-            }
+            // c) Drain this ring's CQ and route each bRPC CQE by socket_id.
+            IouringEndpoint::PollCq(poller);
 
             // d) Optional user callback.  Runs on the Poller thread after
             // every PollCq pass.  The handle gives safe access to ring()
@@ -971,20 +1012,35 @@ void IouringEndpoint::PollingModeRelease(bthread_tag_t tag) {
 // PollerAddSid / PollerRemoveSid
 // ---------------------------------------------------------------------------
 
-void IouringEndpoint::PollerAddSid() {
-    bthread_tag_t tag = bthread_self_tag();
-    if (tag < 0 || tag >= static_cast<int>(_poller_groups.size())) { tag = 0; }
-    auto& pollers = _poller_groups[tag].pollers;
-    const size_t index = butil::fmix32(_socket->id()) % pollers.size();
-    pollers[index].op_queue.Enqueue(SidOp{_socket->id(), SidOp::ADD});
+void IouringEndpoint::PollerAddSid(int fd) {
+    if (!BindPoller()) { return; }
+    auto& pollers = _poller_groups[_poller_tag].pollers;
+    pollers[_poller_index].op_queue.Enqueue(
+        SidOp{_socket->id(), fd, SidOp::ADD});
 }
 
 void IouringEndpoint::PollerRemoveSid(const IouringReadSlot& slot) {
+    if (!BindPoller()) { return; }
+    auto& pollers = _poller_groups[_poller_tag].pollers;
+    pollers[_poller_index].op_queue.Enqueue(
+        SidOp{_socket->id(), -1, SidOp::REMOVE, slot});
+}
+
+bool IouringEndpoint::BindPoller() {
+    if (_poller_bound) { return true; }
+    if (_poller_groups.empty()) { return false; }
+
     bthread_tag_t tag = bthread_self_tag();
     if (tag < 0 || tag >= static_cast<int>(_poller_groups.size())) { tag = 0; }
+
     auto& pollers = _poller_groups[tag].pollers;
-    const size_t index = butil::fmix32(_socket->id()) % pollers.size();
-    pollers[index].op_queue.Enqueue(SidOp{_socket->id(), SidOp::REMOVE, slot});
+    if (pollers.empty()) { return false; }
+
+    _poller_tag = tag;
+    _poller_index = static_cast<int>(butil::fmix32(_socket->id()) %
+                                     pollers.size());
+    _poller_bound = true;
+    return true;
 }
 
 }  // namespace iouring
