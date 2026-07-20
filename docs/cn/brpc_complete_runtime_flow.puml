@@ -1,0 +1,218 @@
+@startuml
+' brpc concise TCP/epoll runtime map.
+' Render with:
+'   plantuml -tsvg docs/cn/brpc_complete_runtime_flow.puml
+
+title brpc 核心组件与 TCP/epoll 运行总图（简化版）
+
+left to right direction
+scale max 14000 width
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam roundcorner 10
+skinparam linetype ortho
+skinparam nodesep 28
+skinparam ranksep 38
+skinparam packageStyle rectangle
+skinparam componentStyle rectangle
+skinparam defaultFontName "Noto Sans CJK SC"
+skinparam defaultFontSize 12
+skinparam ArrowFontSize 10
+skinparam NoteFontSize 10
+skinparam PackageFontSize 15
+skinparam PackageFontStyle bold
+
+legend top
+  |<#1565C0>　| 请求/TCP 主链 |<#2E7D32>　| 响应/正常完成 |
+  |<#6A1B9A>　| IOBuf/所有权 |<#EF6C00>　| bthread 调度 |
+  |<#C62828>　| 异常/重试 |<#455A64>　| 初始化/生命周期 |
+endlegend
+
+package "1. 一次 RPC 的端到端主链" as PMain #E3F2FD {
+  package "Request" as PRequest #E3F2FD {
+    actor "Client\n业务代码" as Client
+    component "Stub / Channel / Controller\n选址、超时、correlation id" as ClientControl
+    component "Protocol + IOBuf\n序列化、RpcMeta、attachment" as RequestPack
+    component "client Socket\nStartWrite / writev" as ClientWrite
+    cloud "TCP\nrequest bytes" as RequestWire
+    component "server Socket\nEPOLLIN / readv" as ServerRead
+    component "InputMessenger\n切帧、QueueMessage" as ServerDispatch
+    component "ServiceImpl\n业务方法" as Service
+
+    Client -[#1565C0]-> ClientControl : 1. CallMethod
+    ClientControl -[#1565C0]-> RequestPack : 2. pack_request
+    RequestPack -[#1565C0]-> ClientWrite : 3. IOBuf refs
+    ClientWrite -[#1565C0]-> RequestWire : 4. TCP send
+    RequestWire -[#1565C0]-> ServerRead : 5. EPOLLIN
+    ServerRead -[#1565C0]-> ServerDispatch : 6. _read_buf
+    ServerDispatch -[#1565C0]-> Service : 7. ProcessRpcRequest
+  }
+
+  package "Response" as PResponse #E8F5E9 {
+    component "done->Run\nSendRpcResponse" as ServerDone
+    component "Protocol + IOBuf\nresponse meta/body/attachment" as ResponsePack
+    component "server Socket\nStartWrite / writev" as ServerWrite
+    cloud "TCP\nresponse bytes" as ResponseWire
+    component "client Socket\nEPOLLIN / readv" as ClientRead
+    component "InputMessenger\nProcessRpcResponse" as ClientProcess
+    component "EndRPC\ncallback 或 Join 唤醒" as ClientDone
+
+    ServerDone -[#2E7D32]-> ResponsePack : 8. pack_response
+    ResponsePack -[#2E7D32]-> ServerWrite : 9. IOBuf refs
+    ServerWrite -[#2E7D32]-> ResponseWire : 10. TCP send
+    ResponseWire -[#2E7D32]-> ClientRead : 11. EPOLLIN
+    ClientRead -[#2E7D32]-> ClientProcess : 12. parse + cid
+    ClientProcess -[#2E7D32]-> ClientDone : 13. 首个有效结果
+  }
+
+  PRequest -[hidden]down-> PResponse
+  Service -[#2E7D32]-> ServerDone : 业务完成
+  ClientDone -[#2E7D32,dashed]-> Client : 返回结果
+}
+
+package "2. IOBuf：数据形态与所有权" as PIOBuf #F3E5F5 {
+  component "protobuf / attachment" as UserData
+  component "ZeroCopyStream\n序列化/反序列化适配" as ZeroCopy
+  component "IOBuf view\nSmallView / BigView" as IOBuf
+  component "BlockRef\nBlock + offset + length" as Refs
+  component "Block storage\n引用计数 + pthread-local cache" as Blocks
+  component "发送：引用拼装\nheader/meta/body/attachment" as RefPack
+  component "iovec[]\nwritev 持有 refs 到写完" as Iovec
+  component "接收：IOPortal/readv\n直接填充 block tail" as Portal
+  component "_read_buf -> cut frame\n移动/拆分 BlockRef" as CutFrame
+
+  UserData -[#6A1B9A]-> ZeroCopy : serialize
+  ZeroCopy -[#6A1B9A]-> IOBuf
+  IOBuf -[#6A1B9A]-> Refs : 0..N refs
+  Refs -[#6A1B9A]-> Blocks : 共享 payload
+  IOBuf -[#6A1B9A]-> RefPack : append / move
+  RefPack -[#6A1B9A]-> Iovec : TCP 输出
+  Portal -[#6A1B9A]-> Blocks : 获取可写块
+  Portal -[#6A1B9A]-> CutFrame : readv 后切帧
+  CutFrame -[#6A1B9A]-> ZeroCopy : body / attachment
+}
+
+package "3. Socket + TCP/epoll：发送与接收闭环" as PTCP #FFF3E0 {
+  package "Send" as PSend #FFF3E0 {
+    component "Socket::StartWrite\nMPSC write queue" as StartWrite
+    component "write leader\nIOBuf -> iovec -> writev" as FastWrite
+    component "本次写完\n释放 WriteRequest refs" as WriteComplete
+    component "部分写 / EAGAIN" as Partial
+    component "KeepWrite bthread\n继续消费写队列" as KeepWrite
+    component "注册 EPOLLOUT\nWaitEpollOut" as WaitOut
+    component "EventDispatcher\nEPOLLOUT -> wake" as OutEvent
+
+    StartWrite -[#1565C0]-> FastWrite : 首 writer 获写权
+    FastWrite -[#2E7D32]-> WriteComplete : 全部写完
+    FastWrite -[#C62828]-> Partial : nw < remaining
+    Partial -[#EF6C00]-> KeepWrite : 创建/接力
+    KeepWrite -[#C62828]-> WaitOut : 仍不可写
+    WaitOut -[#455A64]-> OutEvent : epoll_wait
+    OutEvent -[#EF6C00]-> KeepWrite : 唤醒
+    KeepWrite -[#1565C0]-> FastWrite : pop 已写前缀
+  }
+
+  package "Receive" as PReceive #FFF3E0 {
+    component "EventDispatcher\nepoll_wait(EPOLLIN)" as InEpoll
+    component "Socket::OnInputEvent\n合并 _nevent" as InputEvent
+    component "input consumer bthread\nOnEdge / MoreReadEvents" as InputConsumer
+    component "readv -> IOPortal\n循环直到 EAGAIN" as ReadLoop
+    component "Socket::_read_buf\nInputMessenger" as Messenger
+    component "完整消息派发\n前 N-1 条 NOSIGNAL\n最后一条可内联 + flush" as MessageTasks
+
+    InEpoll -[#1565C0]-> InputEvent : SocketId callback
+    InputEvent -[#EF6C00]-> InputConsumer : 首事件创建
+    InputConsumer -[#1565C0]-> ReadLoop
+    ReadLoop -[#6A1B9A]-> Messenger : bytes
+    Messenger -[#1565C0]-> MessageTasks : parse / cut
+  }
+
+  PSend -[hidden]down-> PReceive
+}
+
+package "4. bthread：创建、调度、等待与回收" as PBthread #FFF8E1 {
+  component "任务来源\n业务 start / input consumer /\nProcessInputMessage / KeepWrite" as TaskSource
+  component "创建 TaskMeta\nfn/arg/attr/tag/TLS/version tid" as CreateTask
+  queue "Runnable queues\nlocal WSQ / remote / priority" as RunQueues
+  component "signal_task / flush\n唤醒 ParkingLot worker" as Signal
+  component "TaskGroup::wait_task\nlocal -> remote -> same-tag steal" as Select
+  component "lazy stack + sched_to\njump_stack 切换" as Switch
+  component "RUNNING\n业务、解析、写入、callback" as Running
+  component "协作等待\nbutex/mutex/usleep/Join" as Wait
+  component "Timer / butex / I/O completion\n重新入队" as Wake
+  component "函数返回\nTLS 析构 + version++ + join wake" as Finish
+  component "ending_sched\n复用/归还 stack 与 TaskMeta" as Recycle
+
+  TaskSource -[#EF6C00]-> CreateTask
+  CreateTask -[#EF6C00]-> RunQueues : enqueue
+  CreateTask -[#EF6C00]-> Signal : 非 NOSIGNAL
+  Signal -[#EF6C00]-> Select
+  RunQueues -[#EF6C00]-> Select : pop / steal
+  Select -[#EF6C00]-> Switch
+  Switch -[#EF6C00]-> Running
+  Running -[#EF6C00]-> Wait : 阻塞点
+  Wait -[#EF6C00]-> Wake : 挂起 TaskMeta\nworker 运行其他任务
+  Wake -[#EF6C00]-> RunQueues
+  Running -[#EF6C00]-> Finish : return
+  Finish -[#EF6C00]-> Recycle
+  Recycle -[#EF6C00]-> Select : 直接接力下一任务
+}
+
+package "5. 初始化、可靠性与退出" as PReliability #ECEFF1 {
+  package "Lifecycle" as PLifecycle #ECEFF1 {
+    component "GlobalInitializeOrDie\n协议/命名/LB 注册\nTaskControl + EventDispatcher" as GlobalInit
+    component "Server::StartInternal\nService + TLS pool + Acceptor" as ServerStart
+    component "RUNNING\n接收请求 + 发起下游 RPC" as Runtime
+    component "Stop\n停止接收新请求" as Stop
+    component "Join\n等待 inflight，销毁 TLS/资源" as Join
+
+    GlobalInit -[#455A64]-> ServerStart
+    ServerStart -[#455A64]-> Runtime
+    Runtime -[#455A64]-> Stop : 摘流量后
+    Stop -[#455A64]-> Join : drain
+  }
+
+  package "Completion" as PCompletion #FFEBEE {
+    component "Controller\ncorrelation id + timer" as Correlation
+    component "正常 response\ncid lock 获胜" as Success
+    component "timeout / socket error /\noverload / cancel" as Failure
+    component "Retry / Backup\n新 version、可选另一 Socket" as Retry
+    component "EndRPC\n只完成一次" as EndRPC
+    component "callback / Join wake\nLB 反馈 + timer 清理" as Callback
+    component "bvar / rpcz / builtin\n延迟、错误、连接、worker" as Observe
+
+    Correlation -[#2E7D32]-> Success : response
+    Correlation -[#C62828]-> Failure : timer/error
+    Failure -[#C62828]-> Retry : policy 允许
+    Retry -[#C62828]-> Correlation : IssueRPC
+    Failure -[#C62828]-> EndRPC : 不再重试
+    Success -[#2E7D32]-> EndRPC
+    EndRPC -[#2E7D32]-> Callback
+    Callback -[#455A64]-> Observe : 记录结果
+  }
+
+  PLifecycle -[hidden]down-> PCompletion
+}
+
+PMain -[hidden]down-> PIOBuf
+PIOBuf -[hidden]down-> PTCP
+PTCP -[hidden]down-> PBthread
+PBthread -[hidden]down-> PReliability
+
+note right of IOBuf
+  IOBuf 的“零拷贝”是用户态引用拼装/切分；
+  TCP writev/readv 仍存在用户态与内核态复制。
+end note
+
+note right of Running
+  普通 bthread 等待只挂起 TaskMeta，不占住 worker；
+  原生阻塞 syscall、长 CPU 计算或 pthread stack 会占住 worker。
+end note
+
+note right of EndRPC
+  correlation id 保证客户端只完成一次；
+  retry/backup 不保证服务端只执行一次。
+end note
+
+@enduml
