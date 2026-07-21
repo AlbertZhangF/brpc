@@ -4,7 +4,7 @@
 基于当前 checkout 的真实代码，产出一份包含 PlantUML 图、组件实现原理、运行时序、数据变化及 `example/rdma_performance` 端到端流程的完整中文资料。
 
 ## Current Phase
-Phase 25 已完成，等待交付
+Phase 30 已完成，等待交付
 
 ## Phases
 
@@ -165,6 +165,46 @@ Phase 25 已完成，等待交付
 - [x] 校验文档行数、PlantUML 控制块、Markdown 和空白
 - **Status:** complete
 
+### Phase 26: 扩写 IOBuf 数据结构与 TLS 交互
+- [x] 复核 Block、BlockRef、SmallView、BigView、IOPortal 和 pthread-local TLSData 实现
+- [x] 在图 2 后增加各数据结构的职责、关键字段、所有权和转换条件说明
+- [x] 在第 2 章补充 append/readv/切帧/回收各阶段与 TLS block cache 的交互
+- [x] 区分 pthread-local IOBuf cache、bthread local storage 和 payload 生命周期
+- [x] 校验章节结构、PlantUML、行数、源码语义和空白
+- **Status:** complete
+
+### Phase 27: 扩写图 4 的 bthread 生命周期详解
+- [x] 复核图 4 各节点对应的创建、入队、唤醒、选取、切换、等待和回收源码
+- [x] 在 3.2 节增加逐阶段流程表和关键状态/竞态说明
+- [x] 明确 background/urgent/NOSIGNAL、local/remote queue、普通栈/pthread stack 分支
+- [x] 明确 bthread 挂起与 worker pthread 阻塞的边界，以及 TLS/version/join 回收顺序
+- [x] 将新增要求后的文档控制在 1000 行以内并完成静态校验
+- **Status:** complete
+
+### Phase 28: 补充图 4 生命周期整体文字说明
+- [x] 在源码动作表前增加连续的 bthread 生命周期总览
+- [x] 从创建、排队、调度、执行、等待恢复到逻辑/物理回收形成完整叙事
+- [x] 解释 TaskMeta、worker pthread、用户态栈、TLS 和 versioned tid 在各阶段的关系
+- [x] 保留原有源码动作表和关键不变量，并更新小节编号
+- [x] 将文档控制在 1000 行以内并完成静态校验
+- **Status:** complete
+
+### Phase 29: 新增第 2 章独立 TLS 机制说明
+- [x] 新增独立 TLS 小节，说明 IOBuf pthread-local cache 的目的、对象和生命周期
+- [x] 解释 share/acquire/release、缓存上限、thread-atexit 和 BlockRef 所有权
+- [x] 单独对比 IOBuf pthread TLS 与 bthread TLS，并说明 worker 迁移行为
+- [x] 顺延常见误区和源码入口编号，保持既有图表引用正确
+- [x] 将文档控制在 1000 行以内并完成结构/空白校验
+- **Status:** complete
+
+### Phase 30: 简化并整齐化图 4
+- [x] 将嵌套源码节点收敛为 CREATED、READY、SCHEDULING、RUNNING、SUSPENDED、END、RECYCLED 主状态
+- [x] 保留 background/urgent、等待恢复和两阶段回收分支
+- [x] 将队列、ParkingLot、lazy stack、TLS 切换等实现细节移入对应状态注释
+- [x] 同步更新图后阶段表中的节点名称
+- [x] 校验 PlantUML/Markdown 结构、文档行数和尾随空白
+- **Status:** complete
+
 ## Key Questions
 1. brpc 如何把用户 RPC 调用转换为协议帧、Socket 写入和异步完成事件？
 2. 服务端从监听 fd 可读到业务方法执行，分别在哪些 pthread/bthread 上发生？
@@ -192,6 +232,7 @@ Phase 25 已完成，等待交付
 | rdma_performance 单请求数据演化图嵌入主文档第 11.7 节 | 保持简化总图不变，并让纯 TCP 专项图紧邻对应分析 |
 | 新建独立 TCP 精要版并控制为 4 章 6 图 | 支持 30–45 分钟讲解，同时保留到完整资料的深挖入口 |
 | 精要版统一使用 `rdma_performance` 的 1KB TCP 场景 | 避免各章节使用不同示例造成执行上下文和数据形态断裂 |
+| 图 4 详解扩写后将精要版上限从 900 调整为 1000 行 | 用户要求覆盖生命周期各流程与细节，不能为了旧行数目标省略关键状态转换 |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
@@ -204,6 +245,7 @@ Phase 25 已完成，等待交付
 | 一次 `rg` 命令在双引号中包含 Markdown 反引号，shell 将其误作命令替换 | 1 | 只影响只读统计输出；后续正则使用单引号，避免再次触发 |
 | TCP 精要版首稿为 1019 行，超过 900 行上限 | 1 | 压缩 PlantUML 内部空行和重复文案，不删除流程节点或技术边界 |
 | 图 1 整块替换补丁因 participant 顺序上下文不匹配而失败 | 1 | 重新读取当前图的精确文本，使用完整精确上下文替换 |
+| 图 4 首次整块替换因旧图上下文漏写 `Running --> Exit` 而匹配失败 | 1 | 重新读取精确图块后按完整上下文替换成功 |
 
 ## Notes
 - 不修改框架行为，不执行外部网络操作。
@@ -216,3 +258,8 @@ Phase 25 已完成，等待交付
 - 2026-07-20 新增 TCP 精要版：887 行、3913 词、4 个主章节、6 个 PlantUML block、14 对 Markdown fence；静态结构、引用路径、范围和空白检查通过，环境仍无 `plantuml`，未实际渲染 SVG。
 - 2026-07-20 在精要版图 1 前明确引用完整资料第 11.7.1 节；场景参数和技术语义不变。
 - 2026-07-20 参照 11.7.1 重构精要版图 1 为 Client process / TCP / Server process 三段布局；文档为 871 行，图内 2 个 box、3 组 alt/loop 控制块均配对。
+- 2026-07-20 扩写第 2 章的数据结构和 TLS 交互后，文档为 899 行、4173 词；仍为 4 章、6 图，PlantUML/Markdown、路径、空白检查通过。
+- 2026-07-20 扩写图 4 生命周期详解后，文档为 933 行、4521 词；新增 16 阶段源码动作表和 10 条调度/竞态不变量说明，静态检查通过。
+- 2026-07-20 在图 4 后增加连续生命周期总览并映射到 RunTest/callback；文档为 951 行、4687 词，结构和空白检查通过。
+- 2026-07-20 第 2 章新增独立 TLS 机制小节后，文档为 962 行、4766 词；2.1–2.9 连续，4 章、6 图和 Markdown 结构保持完整。
+- 2026-07-20 图 4 从多层嵌套源码状态收敛为 7 个生命周期主状态，源码细节保留在 5 个注释和 16 阶段表中；文档为 932 行、4616 词，静态结构和空白检查通过。

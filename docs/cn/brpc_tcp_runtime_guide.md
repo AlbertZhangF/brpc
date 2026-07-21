@@ -203,6 +203,8 @@ IOBuf view
 
 一个 IOBuf 最多两个引用时直接使用内嵌 `SmallView.refs[2]`；
 引用更多时使用环形 `BigView`，保存动态 BlockRef 数组、起点、数量和总字节数。
+TLS 只参与 Block 的分配与复用：每次 append/readv 使用当前 pthread 的 `g_tls_data`；
+已经形成 BlockRef 的数据由引用计数持有，可以跨 bthread、worker 和线程转交。
 
 ### 2.2 图 2：IOBuf 对象结构
 
@@ -233,16 +235,17 @@ class BlockRef {
 }
 class Block {
   data[]
-  size
-  capacity
-  nshared
+  size / capacity
+  nshared / flags
+  portal_next
 }
-class "pthread-local\nIOBuf block cache" as Cache {
+class "TLSData\npthread-local block cache" as Cache {
   block_head
   num_blocks
+  registered
 }
 class IOPortal {
-  cached writable blocks
+  _block writable chain
   readv iovec[]
 }
 IOBuf *-- SmallView : refs <= 2
@@ -258,20 +261,32 @@ note bottom of Cache : cache 是 pthread-local 内存复用机制\n不是 bthrea
 @enduml
 ```
 
+各结构的职责和生命周期如下：
+
+| 数据结构 | 关键字段 | 职责与所有权 |
+|---|---|---|
+| `IOBuf` | `SmallView/BigView` union | 表示逻辑字节队列；不同对象可并发使用，同一对象不能被多线程并发修改 |
+| `SmallView` | 内嵌 `refs[2]` | 保存最多两个非合并 BlockRef，避免为常见小 IOBuf 分配引用数组 |
+| `BigView` | `start/refs/nref/cap_mask/nbytes` | 环形 BlockRef 数组；第三个不能合并的 ref 触发转换，容量从 32 起扩展 |
+| `BlockRef` | `offset/length/block` | 描述 Block 中的一个逻辑区间；复制 ref 会 `nshared++`，相邻同 Block 区间可合并 |
+| `Block` | `data/size/cap/nshared/flags/u` | 持有实际字节与原子引用计数；`u.portal_next` 可把空闲 Block 串成 TLS/IOPortal 链 |
+| `TLSData` | `block_head/num_blocks/registered` | 每个 pthread 的非满 Block 缓存；`registered` 保证只注册一次 thread-atexit 清理 |
+| `IOPortal` | IOBuf 基类 + `_block` | 从 TLS 摘取可写 Block，构造 `iovec[]` 接收；保留未用尾块以减少后续 read 的分配和 BlockRef 数 |
+
 ### 2.3 常用操作的复制矩阵
 
-| 操作 | payload 是否复制 | 引用/所有权变化 | 典型用途 |
+| 操作 | payload 是否复制 | 引用/所有权变化 | 与 TLS 的交互 |
 |---|---:|---|---|
-| `append(const IOBuf&)` | 否 | 复制 BlockRef，Block ref++ | 拼 attachment |
-| `append(IOBuf::movable())` | 否 | 移动 refs，源变空 | 响应打包 |
-| `cutn(IOBuf*, n)` | 否 | 整 ref 移动；边界处拆 ref | 从 payload 切 body |
-| `swap(IOBuf&)` | 否 | 交换 view/refs | payload 变 attachment |
-| `append(void*, n)` | 是 | 复制到可写 Block | 原始连续内存进入 IOBuf |
-| `cutn(void*, n)` | 是 | Block 字节复制到连续目标 | 提取固定头 |
-| protobuf serialize | 通常是 | object 字段编码到 IOBuf | request/response body |
-| protobuf parse | 解析/分配 | IOBuf 字节变 object 字段 | 接收业务对象 |
-| `writev` | 是 | 用户页数据进入 kernel send buffer | TCP 发送 |
-| `readv` | 是 | kernel receive buffer 进入 IOPortal Block | TCP 接收 |
+| `append(const IOBuf&)` | 否 | 复制 BlockRef，Block ref++ | 不取 TLS Block |
+| `append(IOBuf::movable())` | 否 | 移动 refs，源变空 | 不取 TLS Block |
+| `cutn(IOBuf*, n)` | 否 | 整 ref 移动；边界处拆 ref | 与 TLS cache 无关 |
+| `swap(IOBuf&)` | 否 | 交换 view/refs | 与 TLS cache 无关 |
+| `append(void*, n)` | 是 | 复制到可写 Block | `share_tls_block()` 借当前 pthread 的非满 Block |
+| `cutn(void*, n)` | 是 | Block 字节复制到连续目标 | 不取 TLS Block |
+| protobuf serialize | 通常是 | object 字段编码到 IOBuf | 输出流追加时可复用当前 pthread Block |
+| protobuf parse | 解析/分配 | IOBuf 字节变 object 字段 | protobuf 对象分配不属于 IOBuf TLS |
+| `writev` | 是 | 用户页数据进入 kernel send buffer | 只读取 refs，不归还 TLS |
+| `readv` | 是 | kernel receive buffer 进入 IOPortal Block | `acquire_tls_block()` 从当前 pthread cache 摘取 Block |
 
 因此，IOBuf 的准确说法是：
 
@@ -287,19 +302,19 @@ skinparam shadowing false
 skinparam componentStyle rectangle
 left to right direction
 rectangle "client 原始连续内存\n_addr[1024]" as Raw
-rectangle "client IOBuf BlockA\n1024 random bytes" as A
+rectangle "client IOBuf BlockA\nshare_tls_block(current pthread)" as A
 rectangle "Controller request_attachment\nBlockRef(A, 0, 1024)" as CA
 rectangle "PRPC request IOBuf\nheader/meta/body refs + A ref" as FrameA
 rectangle "client iovec[]" as IovA
 rectangle "client kernel\nsend buffer" as KSendA
 rectangle "TCP ordered\nbyte stream" as Wire
 rectangle "server kernel\nreceive buffer" as KRecvS
-rectangle "server IOPortal BlockS\nPRPC bytes" as S
+rectangle "server IOPortal BlockS\nacquire_tls_block(server worker)" as S
 rectangle "server request_attachment\nBlockRef(S attachment range)" as RS
 rectangle "server response_attachment\nshared BlockRef(S range)" as RespS
 rectangle "server kernel\nsend buffer" as KSendS
 rectangle "client kernel\nreceive buffer" as KRecvC
-rectangle "client IOPortal BlockC\nresponse bytes" as C
+rectangle "client IOPortal BlockC\nacquire_tls_block(client worker)" as C
 rectangle "Controller response_attachment\nBlockRef(C attachment range)" as RC
 Raw -[#red,bold]-> A : append(void*, 1024)\nCOPY
 A -[#green,bold]-> CA : append(IOBuf)\nref++
@@ -315,7 +330,7 @@ RespS -[#red,bold]-> KSendS : writev\nCOPY user -> kernel
 KSendS --> KRecvC : TCP
 KRecvC -[#red,bold]-> C : readv\nCOPY kernel -> user
 C -[#green,bold]-> RC : cutn + swap\nmove refs
-note bottom of A : BlockA、BlockS、BlockC 是三组不同物理内存\n绿色为引用操作，红色为 payload 复制
+note bottom of A : TLS cache 只供应/回收 Block；BlockRef 决定数据生命周期\nBlockA、BlockS、BlockC 是不同物理内存
 @enduml
 ```
 
@@ -323,41 +338,65 @@ note bottom of A : BlockA、BlockS、BlockC 是三组不同物理内存\n绿色�
 
 以 `baidu_std` 的请求解析为例：
 
-1. `IOPortal::append_from_file_descriptor()` 为多个 Block 的剩余空间构造 `iovec[]`。
-2. `readv(fd, iovec, n)` 把内核接收缓冲区复制进这些 Block。
-3. IOPortal 只为实际读到的范围创建 BlockRef，未使用空间继续缓存。
-4. `ParseRpcMessage()` 先复制读取固定 12B header，确认完整帧长度。
-5. 它从 `_read_buf` 移除 header，再用 `cutn(IOBuf*)` 切出 meta 和 payload。
-6. `ProcessRpcRequest()` 根据 `attachment_size` 从 payload 前端切出 protobuf body。
-7. 余下 payload 通过 `cntl->request_attachment().swap(msg->payload)` 转交 Controller。
+1. input consumer bthread 在 worker W 上运行，此时 `g_tls_data` 属于 W 的 pthread TLS。
+2. IOPortal 用 `acquire_tls_block()` 从 W 的 cache 摘取非满 Block；cache 为空才创建 Block。
+3. 它用 Block 尾部空间构造 `iovec[]`，`readv` 把内核字节复制进 Block。
+4. 只为实际收到的范围创建 BlockRef；未使用的非满尾块继续挂在 IOPortal `_block` 链。
+5. `ParseRpcMessage()` 检查 12B header 和完整帧长度，再用 `cutn(IOBuf*)` 切 meta/payload。
+6. `ProcessRpcRequest()` 切出 protobuf body，并把剩余 1024B `swap` 给 request attachment。
+7. 当 `_read_buf` 消费为空时，InputMessenger 调用 `return_cached_blocks()`，未用尾块进入当前 pthread TLS。
 
-只有步骤 2 是 attachment 的内核到用户复制；
-步骤 5–7 主要调整 BlockRef 范围或所有权。
+只有步骤 3 是 attachment 的内核到用户复制；步骤 5–6 主要调整 BlockRef。
+TLS 优化的是 Block 分配/复用，不会额外复制、保存或拥有业务 payload。
 
-### 2.6 引用计数、缓存与生命周期
+### 2.6 引用计数与 Block 生命周期
 
 - `_push_back_ref` 为共享 BlockRef 增加 Block 引用。
 - `_move_back_ref` 转移 ref，不额外保留源所有权。
 - IOBuf 析构或 `pop_front/clear` 释放 refs；最后一个引用消失后 Block 才可回收。
-- `share_tls_block()` 从当前 pthread 的 block cache 取未满 Block，用于小块追加。
-- IOPortal 会缓存可写 Block；当 `_read_buf` 被消费为空时，InputMessenger 主动归还缓存。
-- TLS block cache 解决分配复用，不改变“哪个 IOBuf 逻辑拥有某段字节”的 BlockRef 语义。
 
-### 2.7 常见误区
+### 2.7 TLS 机制：pthread Block cache 与 bthread TLS
+
+IOBuf 中的 TLS 是 Thread Local Storage，具体对象是 `static __thread TLSData g_tls_data`。它属于物理 pthread，保存非满 Block 链表、数量和清理注册状态。设计目标是让频繁的 append/readv 复用当前 worker 已分配的 Block，减少 malloc/free 和跨线程共享 allocator cache 的竞争；它不是请求级存储，也不保存 Controller 或 attachment。
+
+一次缓存生命周期如下：
+
+1. 当前 pthread 首次需要 Block 时初始化 `g_tls_data`，创建 Block，并用 `butil::thread_atexit()` 注册一次退出清理。
+2. `append(void*, n)` 调用 `share_tls_block()`：借用 cache 头部但不摘链，IOBuf 建立 BlockRef 后通过引用计数共同持有。
+3. IOPortal 调用 `acquire_tls_block()`：从 cache 摘下一个非满 Block，独占其尾部构造 readv 的 `iovec[]`。
+4. read/切帧完成后，`release_tls_block_chain()` 将未使用的非满尾块放入当前 pthread cache；超出软上限则 dec_ref。
+5. 每线程默认最多缓存 8 个 Block；启用 IOBuf profiler 时上限为 0；pthread 退出时 `remove_tls_block_chain()` 清空链表。
+
+缓存归属和数据所有权是两回事。TLS 持有的是“可继续写入的 Block 缓存引用”，IOBuf/Controller 持有的是描述有效字节范围的 BlockRef。Block 即使离开原 worker 的 TLS，只要 cache、IOPortal 或任一 BlockRef 仍持有引用就不会释放；所有引用都 `dec_ref()` 后才回收实际内存。
+
+bthread 可能在挂起后由另一个 worker 恢复，因此它下一次 append/readv 会访问新 worker 的 `g_tls_data`，未用 Block 也可能归还到当前而非最初 cache。IOBuf Block 没有线程亲和性，这种迁移是安全的。与此不同，bthread TLS 属于逻辑任务：`sched_to()` 把 `tls_bls` 保存到当前 `TaskMeta::local_storage`，再恢复目标 bthread 的数据。
+
+两套 TLS 的边界如下：
+
+| 机制 | 归属与内容 | 切换/销毁 |
+|---|---|---|
+| IOBuf `g_tls_data` | 物理 pthread；缓存可复用 Block | bthread 切换时不切换；pthread 退出清链 |
+| bthread `tls_bls/TaskMeta::local_storage` | 逻辑 bthread；KeyTable、assigned data、span 等 | `sched_to()` 保存/恢复；bthread 结束执行析构 |
+
+### 2.8 常见误区
 
 - `append(IOBuf)` 不复制，不代表 `append(void*, n)` 也不复制。
+- IOBuf 的 pthread TLS cache 不是 bthread TLS，也不保存 Controller attachment。
+- bthread 迁移后不要求 Block 回到原 worker；引用计数使 Block 生命周期与 cache 归属解耦。
 - `writev` 的 scatter/gather 避免用户态先合并，通常仍把数据复制进内核发送缓冲区。
 - `readv` 能一次填多个 Block，通常仍从内核接收缓冲区复制到用户态。
 - TCP 两端不共享 Block；服务端回显引用的是 BlockS，client 最终收到的是新 BlockC。
 - protobuf 的“ZeroCopyStream”表示与 IOBuf block 直接配合，仍需把对象字段编码成 wire bytes。
 
-### 2.8 关键源码入口
+### 2.9 关键源码入口
 
 - 对象模型：`src/butil/iobuf.h::IOBuf::BlockRef/SmallView/BigView`。
+- Block/TLSData：`src/butil/iobuf_inl.h::IOBuf::Block/TLSData`。
 - 引用操作：`src/butil/iobuf.cpp::IOBuf::append`、`cutn`、`swap`。
-- block cache：`src/butil/iobuf.cpp::share_tls_block`。
+- block cache：`src/butil/iobuf.cpp::share_tls_block/acquire_tls_block/release_tls_block_chain`。
 - 接收：`src/butil/iobuf.cpp::IOPortal::pappend_from_file_descriptor`。
 - 发送：`src/butil/iobuf.cpp::cut_multiple_into_file_descriptor`。
+- bthread TLS 对照：`src/bthread/task_group.cpp::TaskGroup::sched_to/task_runner`。
 
 ## 3. bthread 创建、调度和销毁
 
@@ -387,94 +426,116 @@ note bottom of A : BlockA、BlockS、BlockC 是三组不同物理内存\n绿色�
 title bthread：创建、入队、调度、等待、恢复与回收
 hide empty description
 skinparam shadowing false
-[*] --> API : bthread_start_background/urgent
-state API {
-  [*] --> SelectGroup
-  SelectGroup : 识别当前是否 worker
-  SelectGroup : 选择 tag / TaskGroup
+top to bottom direction
+skinparam linetype ortho
+skinparam state {
+  BackgroundColor #F7FAFC
+  BorderColor #4A5568
+  FontColor #1A202C
 }
-API --> Allocate
-state Allocate {
-  [*] --> GetMeta
-  GetMeta : ResourcePool get TaskMeta slot
-  GetMeta --> InitMeta
-  InitMeta : fn / arg / attr
-  InitMeta : local_storage = INIT
-  InitMeta : version_butex + slot -> tid
-  InitMeta : stack 仍为 NULL（lazy）
-}
-Allocate --> LocalQueue : worker 同 tag background
-Allocate --> RemoteQueue : non-worker / 跨 tag
-Allocate --> UrgentSwitch : urgent 且可本地执行
-state LocalQueue {
-  [*] --> PushRQ
-  PushRQ : push local _rq
-}
-state RemoteQueue {
-  [*] --> PushRemote
-  PushRemote : lock + push _remote_rq
-}
-LocalQueue --> Signal : 非 NOSIGNAL
-RemoteQueue --> Signal : 非 NOSIGNAL
-LocalQueue --> Batched : BTHREAD_NOSIGNAL
-RemoteQueue --> Batched : BTHREAD_NOSIGNAL
-Batched --> Signal : bthread_flush
-state Signal {
-  [*] --> SignalTask
-  SignalTask : TaskControl::signal_task
-  SignalTask --> WakeWorker
-  WakeWorker : ParkingLot 唤醒或扩展 worker
-}
-Signal --> SelectTask
-UrgentSwitch --> SelectTask
-state SelectTask {
-  [*] --> PopLocal
-  PopLocal : pop own _rq
-  PopLocal --> Steal : local empty
-  Steal : steal other _rq / _remote_rq
-  Steal --> MainStack : no runnable task
-}
-SelectTask --> PrepareStack : 获得 tid
-state PrepareStack {
-  [*] --> LazyStack
-  LazyStack : stack == NULL 时 get_stack
-  LazyStack : 结束任务可把相同类型栈交给下一个任务
-  LazyStack --> PthreadMode : pthread stack attr / 分配失败
-}
-PrepareStack --> Switch
-state Switch {
-  [*] --> SaveContext
-  SaveContext : 保存 errno / bthread local storage / 统计
-  SaveContext --> RestoreContext
-  RestoreContext : 恢复 next TaskMeta local_storage
-  RestoreContext --> Jump
-  Jump : sched_to -> jump_stack
-}
-Switch --> Running
-Running : task_runner -> fn(arg)
-Running --> Runnable : yield
-Running --> Waiting : butex / mutex / condition / Join
-Running --> Sleeping : bthread_usleep
-Running --> Exit : fn return / bthread_exit
-Runnable --> LocalQueue : remained callback 重新入队
-Waiting --> RemoteQueue : wake / I/O completion
-Sleeping --> RemoteQueue : TimerThread 到期
-state Exit {
-  [*] --> DestroyTLS
-  DestroyTLS : KeyTable/TLS destructor
-  DestroyTLS --> AdvanceVersion
-  AdvanceVersion : version_butex++
-  AdvanceVersion : wake joiners
-  AdvanceVersion --> EndingSched
-  EndingSched : ending_sched 选择下一任务
-  EndingSched --> Release
-  Release : return_stack
-  Release : return TaskMeta slot
-}
-Exit --> [*]
-note right of Waiting : 普通 bthread 等待会挂起当前 bthread\nworker 返回调度器运行其他任务，不等于阻塞 worker pthread
+
+state "CREATED\n创建" as Created
+state "READY\n已入可运行队列" as Ready
+state "SCHEDULING\n选任务并切换上下文" as Scheduling
+state "RUNNING\n执行 task_runner -> fn(arg)" as Running #E8F5E9
+state "SUSPENDED\n等待事件" as Suspended #FFF8E1
+state "END\n逻辑结束" as Ending
+state "RECYCLED\n物理回收" as Recycled
+
+[*] --> Created : bthread_start_*
+Created --> Ready : background\nlocal/remote 入队
+Created --> Scheduling : urgent 且 worker/tag 兼容\n当前任务回队后直接调度
+Ready --> Scheduling : worker 取得任务
+Scheduling --> Running : lazy stack\nsched_to / jump_stack
+Running --> Ready : yield\n切走后重新入队
+Running --> Suspended : butex / mutex / Join\nsleep / I/O wait
+Suspended --> Ready : wake / timer / I/O completion\n重新入队
+Running --> Ending : fn return / bthread_exit
+Ending --> Recycled : ending_sched 切离旧栈\nreturn stack / TaskMeta
+Recycled --> [*]
+
+note right of Created
+  ResourcePool 取得 TaskMeta
+  初始化 fn/arg/attr/TLS/versioned tid
+  stack 仍为 NULL，首次运行时再分配
+end note
+note left of Ready
+  worker 同 tag：local _rq
+  外部 pthread/跨 tag：remote _remote_rq
+  NOSIGNAL 先入队，bthread_flush 再统一唤醒
+end note
+note right of Scheduling
+  pop local，失败后 steal 其他 local/remote queue
+  无任务时 worker 进入 ParkingLot
+  signal_task 唤醒后重新选取
+  切换时保存/恢复 errno、统计和 bthread TLS
+end note
+note right of Suspended
+  仅挂起当前 bthread
+  worker pthread 返回调度器继续运行其他任务
+end note
+note left of Ending
+  先执行 TLS/KeyTable 析构
+  再令 version_butex++ 并唤醒 joiner
+  切离旧栈后才能安全回池
+end note
 @enduml
 ```
+
+#### 3.2.1 生命周期总览
+
+一个 bthread 的生命周期由两个相互独立的部分组成：`TaskMeta` 表示逻辑任务，worker pthread 提供实际 CPU。创建 bthread 时通常不会创建 pthread，也不会马上分配用户态栈；框架先取得 TaskMeta，记录函数、参数、属性、TLS 和 versioned tid，再把它变成一个 READY 任务。其主状态可以概括为：
+
+```text
+CREATED -> READY -> SCHEDULING -> RUNNING
+        -> { READY | SUSPENDED -> READY | END -> RECYCLED }
+```
+
+其中 urgent 且调用环境兼容时可以跳过 READY，直接由 CREATED 进入 SCHEDULING。
+
+创建阶段首先判断调用者所在的执行环境。worker 内创建的 background 任务通常进入当前 TaskGroup 的 local queue，main pthread 等外部线程创建的任务进入某个 TaskGroup 的 remote queue；urgent 任务在条件允许时直接把控制权切给新任务。任务入队后，`signal_task()` 负责唤醒 ParkingLot 中的 worker；NOSIGNAL 只是把多次唤醒合并到 `bthread_flush()`，并没有省略入队或 TaskMeta 创建。
+
+调度阶段从 worker 的 main/idle 栈开始。worker 先取得本地任务，本地为空时再从同 tag 的其他 TaskGroup 窃取；确实没有任务才在 ParkingLot 等待。选中 TaskMeta 后才延迟取得用户态栈，随后 `sched_to()` 保存当前 bthread 的 errno、统计和 TLS，恢复目标任务上下文并执行 `jump_stack()`。控制权进入 `task_runner()` 后，TaskMeta 中的 `fn(arg)` 才真正开始运行。
+
+运行中的 bthread 不会永久绑定某个 worker。调用 yield 时，它在切走后重新进入 READY；等待 butex、mutex、Join、sleep 或 I/O 时，它从 runnable queue 消失并进入 SUSPENDED。此时旧 worker 立即返回调度器执行其他 bthread。Timer、butex wake 或 I/O completion 只需把同一个 TaskMeta 重新放回 runnable queue，它之后可能由另一个 worker 恢复；用户态栈和 bthread TLS 随 TaskMeta 保持，pthread-local IOBuf cache 则取决于恢复时所在的 worker。
+
+用户函数返回只代表“逻辑执行结束”，还不能在当前栈上立即释放自己。`task_runner()` 先执行 TLS/KeyTable 析构，再递增 `version_butex` 使旧 tid 失效并唤醒 joiner；随后 `ending_sched()` 选择下一任务并切离旧栈。确认控制权已经位于其他栈之后，remained callback 才归还 ContextualStack 和 TaskMeta slot，这就是图中 END 与 RECYCLED 分开的原因。
+
+在 `rdma_performance` 示例中，main pthread 创建 `RunTest` 后，它从 remote queue 被 worker 取走，发出初始异步请求便结束并回收；后续请求不是复活这个 bthread，而是由网络回包触发的 client input consumer 执行 `EndRPC -> HandleResponse -> SendRequest()`，形成新的调度接力。
+
+#### 3.2.2 图中各阶段的源码动作
+
+| 阶段 | 图中节点 | 关键实现与状态变化 |
+|---|---|---|
+| 1. API 分流 | CREATED | 检查 `tls_task_group` 和 tag；worker 同 tag 可走当前组，否则 `start_from_non_worker()` 选择目标 TaskGroup |
+| 2. 申请任务元数据 | CREATED | ResourcePool 取得 TaskMeta slot；重置 stop/interrupted/sleep、fn/arg、attr、统计和 local storage，stack 保持 NULL |
+| 3. 生成身份 | CREATED | `make_tid(*version_butex, slot)` 组合版本和槽位；TaskMeta 复用后 version 改变，旧 tid 不会误命中新任务 |
+| 4. background 入队 | READY | worker 本地创建进入无锁 owner `_rq`；外部 pthread 或跨组创建进入 mutex 保护的 `_remote_rq` |
+| 5. urgent 切换 | CREATED -> SCHEDULING | `start_foreground()` 把当前 bthread 通过 remained callback 放回队列，并立即 `sched_to()` 新任务；pthread-stack 调用不会这样抢占 |
+| 6. 唤醒 worker | READY | 普通任务入队后 `signal_task()`；NOSIGNAL 只延后唤醒，任务已经在队列中，`bthread_flush()` 才批量 signal |
+| 7. 等待任务 | SCHEDULING | worker 无任务时保存 ParkingLot state，睡眠前再次 steal；任务到达与入睡竞态不会使 runnable task 永久丢失 |
+| 8. 选择任务 | SCHEDULING | 先从本地 `_rq` pop，再扫描同 tag 其他组的 `_rq/_remote_rq`；可选全局 priority 路径默认关闭 |
+| 9. 准备栈 | SCHEDULING | TaskMeta 首次运行才 `get_stack()`；结束任务可把同类型栈直接交给 next task，失败或 pthread attr 使用 worker main stack |
+| 10. 上下文切换 | SCHEDULING | `sched_to()` 保存 errno、CPU 统计和当前 `tls_bls`，恢复 next local storage，再通过 `jump_stack()` 切换 |
+| 11. 执行入口 | RUNNING | 新栈进入 `task_runner()`，处理切栈后的 remained callback，再调用 `m->fn(m->arg)` |
+| 12. 主动让出 | RUNNING -> READY | `yield()` 先登记“切走后重新入队”的 remained callback，再选择其他任务，避免把仍在运行的栈提前入队 |
+| 13. 阻塞/睡眠 | SUSPENDED | butex/mutex/Join 登记 waiter；sleep 在切走后注册 TimerThread；当前 bthread 变为 SUSPENDED，worker 继续调度 |
+| 14. 重新可运行 | SUSPENDED -> READY | butex wake、Timer 或 I/O completion 校验 TaskMeta/version 后调用 ready_to_run/remote，再次进入 READY |
+| 15. 逻辑结束 | END | 用户函数返回后先执行 KeyTable/TLS/span 析构，再在 version lock 下 version++ 并唤醒 joiner |
+| 16. 物理回收 | RECYCLED | `ending_sched()` 先切到下一个栈；之后 `_release_last_context` 才归还旧 stack 和 TaskMeta slot |
+
+#### 3.2.3 关键细节和不变量
+
+- background 的含义是“创建并入队后返回”，不保证新任务立即运行；urgent 只有在当前 worker/tag 可本地执行时才直接切换。
+- `_remote_rq` 是有锁的有界队列；队列满时会先 flush 待唤醒任务并重试。普通调度不是所有线程竞争一个全局 runnable queue。
+- `signal_task()` 负责唤醒 ParkingLot worker，并限制单次扩散的唤醒数量以减少惊群；队列是任务事实源，signal 只是调度提示。
+- READY 表示 TaskMeta 已在某个 runnable queue；RUNNING 表示正占用一个 worker；SUSPENDED 表示等待条件成立且不在 runnable queue。
+- remained callback 必须在完成栈切换后执行：yield 用它重新入队旧任务，sleep 用它安全注册 timer，退出用它释放已经离开的旧栈。
+- `sched_to()` 不只切寄存器和栈，还切换 bthread local storage、维护 errno 与运行统计；同一 bthread 恢复时看到自己的 TLS。
+- 普通 bthread 在 butex、sleep 或 `WaitEpollOut` 上等待时只挂起自身；原 worker pthread 回到调度器。原生 pthread/pthread-stack 路径才可能占住 OS 线程。
+- `bthread_stop/interrupt` 是协作式通知：设置标志并唤醒 waiter/sleeper，不会在任意指令位置强制抢占或销毁正在运行的用户函数。
+- TLS 析构必须早于 version++；joiner 观察到版本变化并通过 acquire fence 返回时，才能看到目标 bthread 析构及此前写入的结果。
+- TaskMeta 和栈都可回池复用，但 versioned tid、引用的 waiter 状态和“切走后再回收”共同避免旧句柄与旧栈被并发误用。
 
 ### 3.3 创建：API 到 runnable queue
 

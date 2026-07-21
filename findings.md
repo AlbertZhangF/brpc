@@ -256,3 +256,47 @@
 - 精要版第 1.2 节现在显式引用完整资料第 11.7.1 节，便于讲解时从精简图直接跳转到 12 阶段专项分析。
 - 用户要求的是参考 11.7.1 的图形构造而非只增加链接；当前图的 client completion 位于 server 参与者右侧，破坏了“请求 client -> server、响应 server -> client”的视觉方向，需要按进程分区重排。
 - 重排后 participant 顺序为 `Client(C/CP/CS/CC) -> TCP -> Server(SS/SB/SVC)`；这使请求箭头自然向右、响应 writev 与 TCP 回包箭头自然向左，client/server 前后时序不再依赖读者从 participant 名称推断。
+
+## 2026-07-20：IOBuf 数据结构与 TLS 交互扩写
+
+- 本轮只扩写精要文档第 2 章：图 2 后增加数据结构说明，并将 TLS block cache 的获取、使用和归还嵌入 append、IOPortal readv、切帧和生命周期流程。
+- 必须明确区分两类 TLS：IOBuf allocator/cache 的 pthread-local `TLSData`，以及随 TaskMeta 在 bthread 切换时保存/恢复的 bthread local storage。
+- `g_tls_data` 在 `src/butil/iobuf.cpp` 中声明为 `static __thread TLSData`，字段为 block 链表头、缓存数量和 thread-atexit 注册状态；它绑定实际 worker pthread，不随 bthread TaskMeta 迁移。
+- `share_tls_block()` 借用当前 pthread cache 中的未满 Block但不摘链，适合 `append(void*, n)` 等顺序追加；`acquire_tls_block()` 会把一个未满 Block 从 cache 摘下交给 IOPortal 独占构造 readv 写入区。
+- `IOPortal::return_cached_blocks()` 经 `release_tls_block_chain()` 把尚未形成有效数据引用的非满 Block 归还当前 pthread cache；超过每线程阈值时直接 dec_ref，而不是无限缓存。
+- IOBuf 的 BlockRef 引用计数保证 payload 生命周期独立于 TLS cache：即使 bthread 后续迁移到另一 worker，已形成 BlockRef 的 Block 仍由引用计数持有，不依赖原 pthread cache。
+- bthread local storage 则保存在 `TaskMeta::local_storage`，`sched_to()` 在切换时保存当前 `tls_bls` 并恢复下一个任务的 `local_storage`；这与 IOBuf 的 pthread-local allocator cache 是两套机制。
+- IOBuf 的每线程 Block cache 默认软上限是 8；启用 IOBuf profiler 时 `max_blocks_per_thread()` 返回 0。线程退出时 `remove_tls_block_chain()` 对缓存 Block 逐个 dec_ref。
+- 最终第 2 章同时覆盖结构、复制语义、TLS 分配、IOPortal 接收、缓存归还、bthread 迁移和两类 TLS 对照；全文 899 行，仍满足原 900 行上限。
+
+## 2026-07-20：图 4 bthread 生命周期详解
+
+- 用户要求对 3.2 图 4 的所有流程和细节逐段解释；新增内容应紧跟图后，以状态节点到源码动作的映射为主，避免与后续 3.3–3.7 仅做文字重复。
+- 新增要求使 900 行上限不再合理，本轮将精要版控制线调整为 1000 行，保持 4 章和 6 图不变。
+- API 分流首先检查当前是否位于 `tls_task_group` 且 tag 可本地运行；urgent 在 worker 内走 `start_foreground()` 立即切换，background 走 `start_background()` 入队，外部 pthread 统一经 `start_from_non_worker()` 选组。
+- TaskMeta 来自 ResourcePool，创建时 stack 仍为空；tid 由 slot 与 `version_butex` 组合，资源复用后 version 变化使旧 tid 无法错误命中新任务。
+- local `_rq` 是 owner worker 快路径，remote `_remote_rq` 用 mutex 保护；NOSIGNAL 仍然入队，只累计待唤醒数，`bthread_flush()` 才统一 `signal_task()`。
+- worker 的 `wait_task()` 在 ParkingLot 睡眠前保存/检查 state 并再次 steal，避免任务到达与入睡之间丢失唤醒；获得任务后 local pop、跨组 local/remote steal，最后才回 main/idle 栈。
+- `sched_to()` 保存 errno、统计和当前 `tls_bls`，恢复 next TaskMeta local storage 后 `jump_stack()`；切栈后才执行 remained callback，因此可安全完成重新入队或释放旧上下文。
+- sleep 必须先切走再由 remained callback 注册 TimerThread，防止 timer 过早唤醒仍在运行的当前栈；Timer/I/O/butex 完成最终都把 TaskMeta 重新放入 runnable queue。
+- 退出严格按 TLS/KeyTable 析构、version 递增、joiner 唤醒、ending_sched、切到下一栈、`_release_last_context` 回收 stack/TaskMeta 的顺序执行。
+- 最终在 3.2 节加入 16 阶段表和 10 条不变量；全文 933 行，满足本轮调整后的 1000 行上限，且没有增加图数量或修改框架源码。
+
+## 2026-07-20：图 4 生命周期整体说明
+
+- 用户需要的不只是源码动作列表，还需要能独立阅读和讲解的整体文字说明；新增内容应回答“各对象为何存在、控制权如何流动、等待为何不占 worker、退出为何分两阶段”。
+- 现有 16 阶段表和不变量继续作为总览后的查阅索引，不能用更多列表替代连续叙事。
+- 最终 3.2 节形成“状态图 -> 连续生命周期总览 -> 16 阶段源码表 -> 关键不变量”的四层结构，既可直接讲解，也可用于源码定位。
+
+## 2026-07-20：第 2 章独立 TLS 说明
+
+- 当前 TLS 内容已覆盖关键事实，但分散在结构、readv 和生命周期段落中；独立小节需要把“为什么缓存、缓存属于谁、何时获取归还、如何清理、与 bthread TLS 如何交互”串成连续说明。
+- 既有两类 TLS 对照表应移动到独立小节，避免同一信息重复占用篇幅。
+- 独立小节最终形成“设计目的 -> 五步缓存生命周期 -> cache 与数据所有权 -> bthread 迁移 -> 两类 TLS 对照”的完整结构。
+
+## 2026-07-20：图 4 生命周期图简化
+
+- 原图把 API 分流、TaskMeta 初始化、local/remote queue、signal、选取、栈准备、上下文切换和退出步骤都展开成嵌套状态，源码信息完整但视觉主线不突出。
+- 简化图以 bthread 自身状态为主，保留 CREATED、READY、SCHEDULING、RUNNING、SUSPENDED、END、RECYCLED 七个节点；worker 的 ParkingLot 等行为作为 SCHEDULING 注释，不再伪装成任务状态。
+- background 走 CREATED -> READY，兼容环境中的 urgent 可直接进入 SCHEDULING；yield 和事件唤醒回到 READY，函数返回则经过 END 后在切离旧栈时进入 RECYCLED。
+- TaskMeta/versioned tid、local/remote queue、NOSIGNAL/flush、pop/steal/ParkingLot、lazy stack、TLS 切换和两阶段回收仍保留在图中注释，下方 16 阶段表继续承载源码级细节。

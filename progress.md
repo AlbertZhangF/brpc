@@ -321,7 +321,61 @@
   - 请求链按 client -> TCP -> server 从左到右，响应链按 server -> TCP -> client 从右到左闭环。
   - 保留 writev/KeepWrite、完整帧等待、NOSIGNAL/flush、BlockA/S/C 和 EndRPC/callback 语义。
   - 最终文档 871 行；6 个 PlantUML block 仍完整，图 1 的 2 个 box、3 个 alt/loop 与 end 均配对，无尾随空白。
+
+### Phase 26: 扩写 IOBuf 数据结构与 TLS 交互
+- **Status:** complete
+- Actions taken:
+  - 将修改范围限定为精要文档第 2 章及规划记录，不修改框架源码和其他图。
+  - 计划区分 IOBuf 使用的 pthread-local block cache 与 bthread local storage，避免把缓存归属误写成 payload 所有权。
+  - 已复核 SmallView/BigView/BlockRef、pthread-local TLSData、share/acquire/release block 和 bthread `tls_bls` 切换实现。
+  - 已扩写图 2 数据结构表、复制矩阵 TLS 列、BlockA/S/C 的 TLS 来源、server readv 典型流程、缓存生命周期和两类 TLS 对照表。
+  - 最终文档 899 行、4173 词，保持 4 个主章节、6 个 PlantUML block 和 28 条成对 Markdown fence。
+  - TLS 关键符号、4 个新增源码路径、PlantUML 控制块、尾随空白和 `git diff --check` 均通过。
+
+### Phase 27: 扩写图 4 的 bthread 生命周期详解
+- **Status:** complete
+- Actions taken:
+  - 将修改范围限定为精要文档 3.2 节及规划记录，不修改 bthread 源码和 PlantUML 图数量。
+  - 根据新增详细度要求，将文档上限由 900 行调整为 1000 行。
+  - 已复核 API 分流、foreground/background 创建、队列/唤醒、ParkingLot、steal、sched_to、task_runner、sleep/yield/join 和退出回收实现。
+  - 在图 4 后新增 16 阶段源码动作表，覆盖创建、身份、队列、唤醒、选取、栈、切换、等待、恢复和回收。
+  - 新增 10 条关键细节，解释 queue/signal、READY/RUNNING/SUSPENDED、remained callback、阻塞域、协作式 interrupt 和 join 可见性。
+  - 最终文档为 933 行、4521 词；4 个主章节、6 个 PlantUML block、28 条 Markdown fence保持完整，无尾随空白。
+
+### Phase 28: 补充图 4 生命周期整体文字说明
+- **Status:** complete
+- Actions taken:
+  - 确认现有内容以逐项表格为主，缺少从创建到回收的连续文字叙事。
+  - 计划在表格前新增生命周期总览，不删除原有源码映射和技术细节。
+  - 新增 CREATED -> READY -> RUNNING -> READY/SUSPENDED/END -> RECYCLED 的整体状态主线。
+  - 用连续文字解释 TaskMeta/worker 分工、队列与唤醒、lazy stack/TLS 切换、等待恢复和两阶段回收。
+  - 增加 `rdma_performance` 中 RunTest 结束后由 client input consumer/callback 接力的实际映射。
+  - 最终文档为 951 行、4687 词，4 章、6 图和 30 条 Markdown fence 均完整，无尾随空白。
+
+### Phase 29: 新增第 2 章独立 TLS 机制说明
+- **Status:** complete
+- Actions taken:
+  - 决定把第 2.6 节中的两类 TLS 对照表移入新的独立小节，并补充完整文字说明。
+  - 修改范围限定为第 2 章和规划记录，不修改框架源码或 PlantUML 图。
+  - 新增 TLS 设计目的、五步缓存生命周期、引用计数边界、bthread 迁移行为和两类 TLS 对照。
+  - 将原 2.7/2.8 顺延为 2.8/2.9，源码入口与正文引用保持有效。
+  - 最终文档为 962 行、4766 词；4 章、6 图、30 条 Markdown fence完整，无尾随空白。
 - Files created/modified:
+  - `task_plan.md`
+  - `progress.md`
+  - `findings.md`
+
+### Phase 30: 简化并整齐化图 4
+- **Status:** complete
+- Actions taken:
+  - 将图 4 的多层嵌套源码节点收敛为 7 个生命周期状态，形成纵向主链。
+  - 保留 background/urgent 分流、yield、等待/唤醒、逻辑结束和切栈后物理回收。
+  - 把 TaskMeta、队列、NOSIGNAL、ParkingLot、lazy stack、TLS 切换等细节归入 5 个状态注释。
+  - 同步把 16 阶段表的“图中节点”更新为新状态名，并在文字状态摘要中加入 SCHEDULING 与 urgent 跳转。
+  - 静态检查确认图 4 的 start/end 和 5 组 note/end note 配对，全文 6 个 PlantUML block、30 条 Markdown fence 完整，无尾随空白。
+  - 当前环境仍无 PlantUML renderer，因此未实际生成 SVG。
+- Files created/modified:
+  - `docs/cn/brpc_tcp_runtime_guide.md`
   - `task_plan.md`
   - `progress.md`
   - `findings.md`
